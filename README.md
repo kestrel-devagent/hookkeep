@@ -4,6 +4,12 @@
 
 Get a durable HTTPS webhook URL, store payloads, search recent events, open details, and replay/forward to your n8n webhook.
 
+## Live demo (ephemeral tunnel)
+
+**URL:** https://prospects-comprehensive-jackie-approximately.trycloudflare.com
+
+Quick Cloudflare tunnel in front of the Node MVP on the build box. Hostname may change if the tunnel restarts — prefer self-host or Workers for production.
+
 ## Pricing (MVP)
 
 | Tier | Price | Inboxes | Retention | Alerts |
