@@ -4,7 +4,9 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Hookkeep — Hosted webhook inbox for n8n | Kestrel Ops</title>
-<meta name="description" content="Durable HTTPS webhook URLs. Capture, search, and replay payloads to n8n. Free tier + Pro $9/mo." />
+<meta name="description" content="Durable HTTPS webhook URLs. Capture, search, and replay payloads to n8n. Free tier + Pro $9/mo. PayPal unlock — no card required." />
+<meta property="og:title" content="Hookkeep — webhook inbox for n8n" />
+<meta property="og:description" content="Get an HTTPS webhook URL, store events, search, and replay to n8n. Free + Pro $9/mo." />
 <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
@@ -17,6 +19,7 @@
     </div>
   </div>
   <nav>
+    <a href="#how">How it works</a>
     <a href="#pricing">Pricing</a>
     <a href="/app.html" class="btn btn-sm">Open inbox</a>
   </nav>
@@ -25,22 +28,27 @@
 <main>
   <section class="hero">
     <p class="eyebrow">For n8n &amp; automation builders</p>
-    <h1>A durable webhook inbox that actually keeps your payloads.</h1>
+    <h1>Stop losing webhook payloads while you debug.</h1>
     <p class="lede">
       Instant HTTPS URL per inbox. Store events, search them, open the raw JSON,
-      and replay/forward to your n8n webhook when you’re ready.
+      and replay/forward to your n8n webhook when the workflow is ready.
     </p>
     <div class="cta-row">
-      <button id="btn-start" class="btn btn-primary">Create free inbox</button>
-      <a class="btn btn-ghost" href="#pricing">See pricing</a>
+      <button id="btn-start" class="btn btn-primary">Create free inbox — 30 seconds</button>
+      <a class="btn btn-ghost" href="/app.html">I already have a token</a>
     </div>
+    <ul class="hero-proof">
+      <li>✓ No signup form — token is your login</li>
+      <li>✓ Works with Stripe, GitHub, Slack, any webhook</li>
+      <li>✓ Pro unlock via PayPal $9 (manual code — no Stripe tax yet)</li>
+    </ul>
     <p id="start-msg" class="msg" hidden></p>
   </section>
 
-  <section class="grid3">
+  <section id="how" class="grid3">
     <article>
       <h3>1. Get a URL</h3>
-      <p>Each inbox gets a stable <code>/hook/…</code> HTTPS endpoint. Point Stripe, GitHub, or any webhook at it.</p>
+      <p>Each inbox gets a stable <code>/hook/…</code> HTTPS endpoint. Point any provider at it while you build.</p>
     </article>
     <article>
       <h3>2. Inspect</h3>
@@ -72,8 +80,8 @@
         <ul>
           <li>5 inboxes</li>
           <li>5,000 events / month</li>
-          <li>Email alert on keyword / status match</li>
-          <li>Priority support via email</li>
+          <li>Keyword / status alert stub</li>
+          <li>Email support</li>
         </ul>
         <a class="btn btn-primary" href="#pay">Pay $9 — unlock Pro</a>
       </div>
@@ -81,13 +89,30 @@
   </section>
 
   <section id="pay" class="pay">
-    <h2>How to pay (MVP)</h2>
+    <h2>How to unlock Pro (MVP)</h2>
     <ol>
+      <li>Create a free inbox (button above) and save your owner token.</li>
       <li>Send <strong>$9 USD</strong> via PayPal to <code>hudson.gouge@projxon.ai</code> with note <code>Hookkeep Pro $9</code>.</li>
-      <li>Email the same address with: PayPal transaction ID + the email you used in Hookkeep.</li>
-      <li>You receive an unlock code. Paste it in the dashboard (Unlock Pro).</li>
+      <li>Email the same address with PayPal transaction ID + workspace email (or last 8 chars of token).</li>
+      <li>Paste the one-time code in the dashboard → <strong>Unlock Pro</strong>.</li>
     </ol>
-    <p class="fine">Manual unlock is intentional for MVP (no Stripe yet). Codes are one-time.</p>
+    <p class="fine">Manual unlock is intentional for MVP (no Stripe yet). Codes are one-time. Demo codes exist for operators only.</p>
+  </section>
+
+  <section class="faq pay">
+    <h2>FAQ</h2>
+    <details open>
+      <summary>Is the live demo durable?</summary>
+      <p class="fine">The public demo may run on an ephemeral Cloudflare quick tunnel. Self-host with Docker / HF Space / any Node host for production. See <code>DEPLOY.md</code> in the repo.</p>
+    </details>
+    <details>
+      <summary>Do you store secrets from headers?</summary>
+      <p class="fine">Common auth headers are redacted before storage. Treat the inbox as a debug buffer, not a vault.</p>
+    </details>
+    <details>
+      <summary>Lost my token?</summary>
+      <p class="fine">MVP has no magic-link recovery yet — copy the token when you create the workspace. Contact <a href="mailto:hudson.gouge@projxon.ai">hudson.gouge@projxon.ai</a> if you paid Pro and need help.</p>
+    </details>
   </section>
 
   <section class="waitlist">
@@ -114,7 +139,7 @@ async function createWorkspace() {
   msg.hidden = false;
   msg.textContent = 'Creating inbox…';
   try {
-    const email = prompt('Email for this workspace (optional, used for Pro unlock / alerts):') || '';
+    const email = prompt('Email for this workspace (optional — used for Pro unlock / alerts):') || '';
     const res = await fetch('/api/workspace', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -123,7 +148,7 @@ async function createWorkspace() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'failed');
     localStorage.setItem('hookkeep_token', data.ownerToken);
-    msg.innerHTML = `Inbox ready. <a href="/app.html?token=${encodeURIComponent(data.ownerToken)}">Open dashboard →</a>`;
+    msg.innerHTML = `Inbox ready. Save this token: <code>${data.ownerToken}</code> — <a href="/app.html?token=${encodeURIComponent(data.ownerToken)}">Open dashboard →</a>`;
     location.href = '/app.html?token=' + encodeURIComponent(data.ownerToken);
   } catch (e) {
     msg.textContent = 'Could not create inbox: ' + e.message;

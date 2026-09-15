@@ -16,8 +16,8 @@ Codes live in `data/hookkeep.json` → `unlockCodes`.
 
 Seed codes shipped with MVP:
 
-- `HOOKKEEP-PRO-DEMO01`
-- `HOOKKEEP-PRO-KESTREL`
+- `HOOKKEEP-PRO-DEMO01` — **reusable demo** (note contains `demo`; does not burn)
+- `HOOKKEEP-PRO-KESTREL` — one-time launch code
 
 To mint a new code (server offline or via shell):
 

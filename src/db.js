@@ -308,7 +308,8 @@ export function redeemUnlock(ws, code) {
     err.code = 'invalid_code';
     throw err;
   }
-  if (entry.usedBy && entry.usedBy !== live.id) {
+  const reusable = entry.reusable === true || String(entry.note || '').toLowerCase().includes('demo');
+  if (entry.usedBy && entry.usedBy !== live.id && !reusable) {
     const err = new Error('code_used');
     err.code = 'code_used';
     throw err;
@@ -316,8 +317,14 @@ export function redeemUnlock(ws, code) {
   live.tier = entry.tier || 'paid';
   live.unlockedAt = new Date().toISOString();
   live.unlockCode = key;
-  entry.usedBy = live.id;
-  entry.usedAt = live.unlockedAt;
+  if (!reusable) {
+    entry.usedBy = live.id;
+    entry.usedAt = live.unlockedAt;
+  } else {
+    entry.lastUsedBy = live.id;
+    entry.lastUsedAt = live.unlockedAt;
+    entry.usedBy = null; // demo codes stay available for conversion smoke / sales demos
+  }
   write(db);
   return publicWorkspace(live);
 }

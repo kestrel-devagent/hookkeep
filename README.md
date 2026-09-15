@@ -8,7 +8,7 @@ Get a durable HTTPS webhook URL, store payloads, search recent events, open deta
 
 **URL:** https://prospects-comprehensive-jackie-approximately.trycloudflare.com
 
-Quick Cloudflare tunnel in front of the Node MVP on the build box. Hostname may change if the tunnel restarts — prefer self-host or Workers for production.
+Quick Cloudflare tunnel in front of the Node MVP on the build box. Hostname may change if the tunnel restarts — prefer **HF Space Docker / any Node host** (see [DEPLOY.md](./DEPLOY.md)). Workers port lives in `workers/` (needs CF login to publish).
 
 ## Pricing (MVP)
 
@@ -51,6 +51,8 @@ npm test
 - `POST /api/waitlist` `{ "email", "note?" }`
 
 ## Deploy notes
+
+See **[DEPLOY.md](./DEPLOY.md)** for free durable paths (HF Space Docker, Node hosts, Workers stub).
 
 - **Node + JSON file store** — zero native deps; works on any free Node host (Render free, Fly free, Railway trial, HF Docker Space, VPS).
 - Set `PORT` and optional `HOOKKEEP_PUBLIC_URL` (public base URL for webhook links).

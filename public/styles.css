@@ -106,3 +106,9 @@ pre {
 }
 .muted { color: var(--muted); }
 .hidden { display: none !important; }
+
+.hero-proof { list-style: none; padding: 0; margin: 1rem 0 0; color: var(--muted); font-size: 0.95rem; }
+.hero-proof li { margin: 0.35rem 0; }
+.faq details { margin: 0.75rem 0; }
+.faq summary { cursor: pointer; font-weight: 600; }
+.faq details[open] summary { color: var(--accent2); }

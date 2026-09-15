@@ -463,13 +463,20 @@ export default {
         const entry = (await kv.get(`code:${key}`, 'json')) ||
           (BUILTIN_CODES[key] ? { ...BUILTIN_CODES[key] } : null);
         if (!entry) return json({ error: 'invalid_code', message: 'invalid_code' }, 400);
-        if (entry.usedBy && entry.usedBy !== ws.id)
+        const reusable = entry.reusable === true || String(entry.note || '').toLowerCase().includes('demo');
+        if (entry.usedBy && entry.usedBy !== ws.id && !reusable)
           return json({ error: 'code_used', message: 'code_used' }, 400);
         ws.tier = entry.tier || 'paid';
         ws.unlockedAt = new Date().toISOString();
         ws.unlockCode = key;
-        entry.usedBy = ws.id;
-        entry.usedAt = ws.unlockedAt;
+        if (!reusable) {
+          entry.usedBy = ws.id;
+          entry.usedAt = ws.unlockedAt;
+        } else {
+          entry.lastUsedBy = ws.id;
+          entry.lastUsedAt = ws.unlockedAt;
+          entry.usedBy = null;
+        }
         await Promise.all([saveWorkspace(kv, ws), kv.put(`code:${key}`, JSON.stringify(entry))]);
         return json({ ok: true, workspace: publicWorkspace(ws) });
       }
