@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hookkeep — Hosted webhook inbox for n8n | Kestrel Ops</title>
+<meta name="description" content="Durable HTTPS webhook URLs. Capture, search, and replay payloads to n8n. Free tier + Pro $9/mo." />
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="logo">HK</span>
+    <div>
+      <strong>Hookkeep</strong>
+      <small>by Kestrel Ops</small>
+    </div>
+  </div>
+  <nav>
+    <a href="#pricing">Pricing</a>
+    <a href="/app.html" class="btn btn-sm">Open inbox</a>
+  </nav>
+</header>
+
+<main>
+  <section class="hero">
+    <p class="eyebrow">For n8n &amp; automation builders</p>
+    <h1>A durable webhook inbox that actually keeps your payloads.</h1>
+    <p class="lede">
+      Instant HTTPS URL per inbox. Store events, search them, open the raw JSON,
+      and replay/forward to your n8n webhook when you’re ready.
+    </p>
+    <div class="cta-row">
+      <button id="btn-start" class="btn btn-primary">Create free inbox</button>
+      <a class="btn btn-ghost" href="#pricing">See pricing</a>
+    </div>
+    <p id="start-msg" class="msg" hidden></p>
+  </section>
+
+  <section class="grid3">
+    <article>
+      <h3>1. Get a URL</h3>
+      <p>Each inbox gets a stable <code>/hook/…</code> HTTPS endpoint. Point Stripe, GitHub, or any webhook at it.</p>
+    </article>
+    <article>
+      <h3>2. Inspect</h3>
+      <p>List recent events, search by keyword or status, open full headers + body.</p>
+    </article>
+    <article>
+      <h3>3. Replay</h3>
+      <p>Forward any event to your n8n production webhook when the workflow is ready.</p>
+    </article>
+  </section>
+
+  <section id="pricing" class="pricing">
+    <h2>Simple pricing</h2>
+    <div class="price-grid">
+      <div class="card">
+        <h3>Free</h3>
+        <p class="price">$0</p>
+        <ul>
+          <li>1 inbox</li>
+          <li>Last 50 events kept</li>
+          <li>Replay / forward</li>
+          <li>No alerts</li>
+        </ul>
+        <button class="btn" id="btn-start-2">Start free</button>
+      </div>
+      <div class="card card-pro">
+        <h3>Pro</h3>
+        <p class="price">$9<span>/mo</span></p>
+        <ul>
+          <li>5 inboxes</li>
+          <li>5,000 events / month</li>
+          <li>Email alert on keyword / status match</li>
+          <li>Priority support via email</li>
+        </ul>
+        <a class="btn btn-primary" href="#pay">Pay $9 — unlock Pro</a>
+      </div>
+    </div>
+  </section>
+
+  <section id="pay" class="pay">
+    <h2>How to pay (MVP)</h2>
+    <ol>
+      <li>Send <strong>$9 USD</strong> via PayPal to <code>hudson.gouge@projxon.ai</code> with note <code>Hookkeep Pro $9</code>.</li>
+      <li>Email the same address with: PayPal transaction ID + the email you used in Hookkeep.</li>
+      <li>You receive an unlock code. Paste it in the dashboard (Unlock Pro).</li>
+    </ol>
+    <p class="fine">Manual unlock is intentional for MVP (no Stripe yet). Codes are one-time.</p>
+  </section>
+
+  <section class="waitlist">
+    <h2>Waitlist / contact</h2>
+    <form id="wait-form" class="row">
+      <input type="email" name="email" required placeholder="you@company.com" />
+      <input type="text" name="note" placeholder="What will you hook? (optional)" />
+      <button class="btn btn-primary" type="submit">Join waitlist</button>
+    </form>
+    <p id="wait-msg" class="msg" hidden></p>
+    <p class="fine">Questions: <a href="mailto:hudson.gouge@projxon.ai">hudson.gouge@projxon.ai</a></p>
+  </section>
+</main>
+
+<footer>
+  <span>Hookkeep · Kestrel Ops</span>
+  <a href="https://github.com/kestrel-devagent/hookkeep">GitHub</a>
+  <a href="https://kestrel-devagent.github.io/n8n-webhook-catcher/">Free Catcher (offline)</a>
+</footer>
+
+<script>
+async function createWorkspace() {
+  const msg = document.getElementById('start-msg');
+  msg.hidden = false;
+  msg.textContent = 'Creating inbox…';
+  try {
+    const email = prompt('Email for this workspace (optional, used for Pro unlock / alerts):') || '';
+    const res = await fetch('/api/workspace', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, label: 'Hookkeep workspace' }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'failed');
+    localStorage.setItem('hookkeep_token', data.ownerToken);
+    msg.innerHTML = `Inbox ready. <a href="/app.html?token=${encodeURIComponent(data.ownerToken)}">Open dashboard →</a>`;
+    location.href = '/app.html?token=' + encodeURIComponent(data.ownerToken);
+  } catch (e) {
+    msg.textContent = 'Could not create inbox: ' + e.message;
+  }
+}
+document.getElementById('btn-start').onclick = createWorkspace;
+document.getElementById('btn-start-2').onclick = createWorkspace;
+document.getElementById('wait-form').onsubmit = async (ev) => {
+  ev.preventDefault();
+  const fd = new FormData(ev.target);
+  const res = await fetch('/api/waitlist', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: fd.get('email'), note: fd.get('note') }),
+  });
+  const data = await res.json();
+  const m = document.getElementById('wait-msg');
+  m.hidden = false;
+  m.textContent = res.ok ? data.message : 'Invalid email';
+  if (res.ok) ev.target.reset();
+};
+</script>
+</body>
+</html>

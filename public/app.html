@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hookkeep Inbox — Kestrel Ops</title>
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <a href="/" style="text-decoration:none;color:inherit;display:flex;gap:0.75rem;align-items:center">
+      <span class="logo">HK</span>
+      <div><strong>Hookkeep</strong><small>Inbox dashboard</small></div>
+    </a>
+  </div>
+  <nav>
+    <span id="tier-pill" class="pill">…</span>
+    <a href="/#pricing">Upgrade</a>
+  </nav>
+</header>
+
+<div class="app-shell">
+  <div id="boot-gate" class="card">
+    <h2>Open your workspace</h2>
+    <p class="muted">Paste your owner token, or create a new free inbox.</p>
+    <div class="row">
+      <input id="token-input" type="password" placeholder="hk_…" autocomplete="off" />
+      <button class="btn btn-primary" id="btn-load">Load</button>
+      <button class="btn" id="btn-new">Create new</button>
+    </div>
+    <p id="boot-msg" class="msg" hidden></p>
+  </div>
+
+  <div id="app" class="hidden">
+    <div class="toolbar">
+      <strong id="ws-label">Workspace</strong>
+      <span id="usage" class="pill"></span>
+      <button class="btn btn-sm" id="btn-unlock">Unlock Pro</button>
+      <button class="btn btn-sm" id="btn-copy-token">Copy token</button>
+    </div>
+
+    <div class="layout">
+      <aside class="side">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">
+          <strong>Inboxes</strong>
+          <button class="btn btn-sm" id="btn-add-inbox">+</button>
+        </div>
+        <div id="inbox-list"></div>
+        <hr style="border-color:var(--border);margin:1rem 0" />
+        <label class="muted" style="font-size:0.8rem">Forward URL (n8n)</label>
+        <input id="forward-url" type="url" placeholder="https://n8n.example/webhook/…" style="width:100%;margin:0.35rem 0" />
+        <label class="muted" style="font-size:0.8rem">Alert keyword (Pro)</label>
+        <input id="alert-kw" type="text" placeholder="error / failed / 500" style="width:100%;margin:0.35rem 0" />
+        <button class="btn btn-sm" id="btn-save-inbox" style="width:100%;margin-top:0.35rem;justify-content:center">Save inbox</button>
+      </aside>
+
+      <section class="main-panel">
+        <div id="detail-view" class="hidden">
+          <button class="btn btn-sm" id="btn-back">← Back to list</button>
+          <h3 id="ev-title" style="margin:0.75rem 0">Event</h3>
+          <div class="toolbar">
+            <button class="btn btn-primary btn-sm" id="btn-replay">Replay / forward</button>
+            <button class="btn btn-sm" id="btn-copy-body">Copy body</button>
+          </div>
+          <p id="replay-msg" class="msg" hidden></p>
+          <h4 class="muted">Headers</h4>
+          <pre id="ev-headers"></pre>
+          <h4 class="muted">Body</h4>
+          <pre id="ev-body"></pre>
+        </div>
+
+        <div id="list-view">
+          <div class="webhook-box">
+            <span class="muted">Webhook URL</span>
+            <code id="webhook-url">—</code>
+            <button class="btn btn-sm" id="btn-copy-url">Copy</button>
+            <button class="btn btn-sm" id="btn-test">Send test</button>
+          </div>
+          <div class="row" style="margin-bottom:0.75rem">
+            <input id="search" type="search" placeholder="Search events…" />
+            <button class="btn btn-sm" id="btn-refresh">Refresh</button>
+          </div>
+          <table>
+            <thead>
+              <tr><th>When</th><th>Method</th><th>Status</th><th>Preview</th></tr>
+            </thead>
+            <tbody id="events-body">
+              <tr><td colspan="4" class="muted">No events yet. POST to your webhook URL.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+let token = params.get('token') || localStorage.getItem('hookkeep_token') || '';
+let state = { workspace: null, inboxes: [], activeInboxId: null, currentEvent: null };
+
+function authHeaders() {
+  return { 'x-hookkeep-token': token, 'content-type': 'application/json' };
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { ...authHeaders(), ...(opts.headers || {}) },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { data, status: res.status });
+  return data;
+}
+
+function showApp() {
+  $('boot-gate').classList.add('hidden');
+  $('app').classList.remove('hidden');
+}
+
+function showBoot(msg) {
+  $('boot-gate').classList.remove('hidden');
+  $('app').classList.add('hidden');
+  if (msg) { $('boot-msg').hidden = false; $('boot-msg').textContent = msg; }
+}
+
+async function loadWorkspace() {
+  const data = await api('/api/workspace');
+  state.workspace = data.workspace;
+  state.inboxes = data.inboxes;
+  if (!state.activeInboxId && state.inboxes[0]) state.activeInboxId = state.inboxes[0].id;
+  render();
+  showApp();
+  await loadEvents();
+}
+
+function render() {
+  const ws = state.workspace;
+  $('ws-label').textContent = ws.label || ws.id;
+  const tier = $('tier-pill');
+  tier.textContent = ws.tierName + (ws.tier === 'paid' ? '' : ' tier');
+  tier.className = 'pill' + (ws.tier === 'paid' ? ' pro' : '');
+  $('usage').textContent = `${ws.eventsThisMonth}/${ws.limits.maxEventsMonth} events this month · ${state.inboxes.length}/${ws.limits.maxInboxes} inboxes`;
+
+  const list = $('inbox-list');
+  list.innerHTML = '';
+  for (const inbox of state.inboxes) {
+    const b = document.createElement('button');
+    b.className = 'inbox-item' + (inbox.id === state.activeInboxId ? ' active' : '');
+    b.textContent = inbox.name;
+    b.onclick = () => { state.activeInboxId = inbox.id; render(); loadEvents(); };
+    list.appendChild(b);
+  }
+  const active = state.inboxes.find((i) => i.id === state.activeInboxId);
+  if (active) {
+    $('webhook-url').textContent = active.webhookUrl;
+    $('forward-url').value = active.forwardUrl || '';
+    $('alert-kw').value = active.alertKeyword || '';
+  }
+}
+
+async function loadEvents() {
+  if (!state.activeInboxId) return;
+  const q = $('search').value.trim();
+  const data = await api(`/api/inboxes/${state.activeInboxId}/events?q=${encodeURIComponent(q)}`);
+  const tbody = $('events-body');
+  if (!data.events.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="muted">No events yet. POST to your webhook URL.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = data.events.map((e) => `
+    <tr data-id="${e.id}">
+      <td>${new Date(e.receivedAt).toLocaleString()}</td>
+      <td><code>${e.method}</code></td>
+      <td>${e.statusGuess ? `<code>${escapeHtml(e.statusGuess)}</code>` : '—'}</td>
+      <td class="muted">${escapeHtml(e.preview || '')}</td>
+    </tr>`).join('');
+  tbody.querySelectorAll('tr[data-id]').forEach((tr) => {
+    tr.onclick = () => openEvent(tr.dataset.id);
+  });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function openEvent(id) {
+  const data = await api(`/api/events/${id}`);
+  state.currentEvent = data.event;
+  $('list-view').classList.add('hidden');
+  $('detail-view').classList.remove('hidden');
+  $('ev-title').textContent = `${data.event.method} · ${data.event.id}`;
+  $('ev-headers').textContent = JSON.stringify(data.event.headers, null, 2);
+  let body = data.event.bodyText || '';
+  if (data.event.bodyJson) body = JSON.stringify(data.event.bodyJson, null, 2);
+  $('ev-body').textContent = body;
+  $('replay-msg').hidden = true;
+}
+
+$('btn-back').onclick = () => {
+  $('detail-view').classList.add('hidden');
+  $('list-view').classList.remove('hidden');
+  loadEvents();
+};
+
+$('btn-replay').onclick = async () => {
+  if (!state.currentEvent) return;
+  const msg = $('replay-msg');
+  msg.hidden = false;
+  msg.textContent = 'Forwarding…';
+  try {
+    const targetUrl = $('forward-url').value.trim() || undefined;
+    const res = await api(`/api/events/${state.currentEvent.id}/replay`, {
+      method: 'POST',
+      body: JSON.stringify({ targetUrl }),
+    });
+    msg.textContent = res.ok
+      ? `Forwarded → HTTP ${res.status} in ${res.ms}ms`
+      : `Failed: ${res.error || res.message || 'error'}`;
+  } catch (e) {
+    msg.textContent = 'Replay failed: ' + (e.data?.error || e.message);
+  }
+};
+
+$('btn-copy-body').onclick = async () => {
+  await navigator.clipboard.writeText($('ev-body').textContent);
+};
+
+$('btn-copy-url').onclick = async () => {
+  await navigator.clipboard.writeText($('webhook-url').textContent);
+};
+
+$('btn-copy-token').onclick = async () => {
+  await navigator.clipboard.writeText(token);
+  alert('Owner token copied. Store it — it is your login.');
+};
+
+$('btn-test').onclick = async () => {
+  const url = $('webhook-url').textContent;
+  await fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ source: 'hookkeep-test', status: 'ok', at: new Date().toISOString() }),
+  });
+  await loadEvents();
+};
+
+$('btn-refresh').onclick = () => loadEvents();
+$('search').oninput = debounce(() => loadEvents(), 250);
+
+$('btn-save-inbox').onclick = async () => {
+  await api(`/api/inboxes/${state.activeInboxId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      forwardUrl: $('forward-url').value,
+      alertKeyword: $('alert-kw').value,
+    }),
+  });
+  await loadWorkspace();
+};
+
+$('btn-add-inbox').onclick = async () => {
+  const name = prompt('Inbox name');
+  if (name == null) return;
+  try {
+    const data = await api('/api/inboxes', { method: 'POST', body: JSON.stringify({ name }) });
+    state.activeInboxId = data.inbox.id;
+    await loadWorkspace();
+  } catch (e) {
+    if (e.status === 402) alert('Inbox limit reached. Unlock Pro ($9/mo) for 5 inboxes.');
+    else alert(e.message);
+  }
+};
+
+$('btn-unlock').onclick = async () => {
+  const code = prompt('Paste your Pro unlock code (from PayPal fulfillment email)');
+  if (!code) return;
+  try {
+    await api('/api/unlock', { method: 'POST', body: JSON.stringify({ code }) });
+    await loadWorkspace();
+    alert('Pro unlocked. Enjoy 5 inboxes + alerts.');
+  } catch (e) {
+    alert('Unlock failed: ' + (e.data?.error || e.message));
+  }
+};
+
+$('btn-load').onclick = async () => {
+  token = $('token-input').value.trim();
+  if (!token) return;
+  localStorage.setItem('hookkeep_token', token);
+  history.replaceState({}, '', '/app.html?token=' + encodeURIComponent(token));
+  try { await loadWorkspace(); }
+  catch { showBoot('Invalid token'); }
+};
+
+$('btn-new').onclick = async () => {
+  const email = prompt('Email (optional)') || '';
+  const res = await fetch('/api/workspace', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email }),
+  });
+  const data = await res.json();
+  token = data.ownerToken;
+  localStorage.setItem('hookkeep_token', token);
+  history.replaceState({}, '', '/app.html?token=' + encodeURIComponent(token));
+  await loadWorkspace();
+};
+
+function debounce(fn, ms) {
+  let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+}
+
+(async () => {
+  if (token) {
+    $('token-input').value = token;
+    try { await loadWorkspace(); }
+    catch { showBoot('Could not load workspace — check token'); }
+  }
+})();
+</script>
+</body>
+</html>

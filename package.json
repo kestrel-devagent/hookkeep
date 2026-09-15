@@ -1,0 +1,20 @@
+{
+  "name": "hookkeep",
+  "version": "0.1.0",
+  "description": "Hookkeep — hosted webhook inbox by Kestrel Ops",
+  "main": "src/server.js",
+  "scripts": {
+    "test": "node scripts/smoke-test.js",
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@hono/node-server": "^2.1.1",
+    "hono": "^4.13.7",
+    "nanoid": "^6.0.1"
+  }
+}
