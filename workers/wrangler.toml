@@ -1,0 +1,19 @@
+name = "hookkeep"
+main = "src/worker.js"
+compatibility_date = "2026-01-01"
+
+# Static dashboard + landing page served from the repo's existing public/
+[assets]
+directory = "../public"
+binding = "ASSETS"
+
+# Create with: wrangler kv namespace create HOOKKEEP_KV
+# then paste the returned id below.
+[[kv_namespaces]]
+binding = "HOOKKEEP_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+preview_id = "REPLACE_WITH_PREVIEW_KV_NAMESPACE_ID"
+
+# Optional: override the public base URL used in webhookUrl responses
+# [vars]
+# HOOKKEEP_PUBLIC_URL = "https://hookkeep.<your-subdomain>.workers.dev"
