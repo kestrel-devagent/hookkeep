@@ -62,7 +62,7 @@ Returns 503 until `HOOKKEEP_FULFILL_SECRET` is set — safe to leave off.
 
 ## What's left for real subscriptions
 
-1. Wire stripe-billing's `checkout.session.completed` → `POST /api/stripe/fulfill` (see `/workspace/ship/stripe-billing-2026-09-16/`)
+1. ~~Wire stripe-billing fulfill~~ — done in stripe-billing `4f5f846` (`HOOKKEEP_FULFILL_URL` + `HOOKKEEP_FULFILL_SECRET`; pass `workspaceId` on `/subscribe`)
 2. Recurring billing + grace period on cancel
 3. Optional SMTP email delivery (Resend/Mailgun free tier) — webhook + mailto covers MVP
 4. Durable multi-region store (Cloudflare D1 / Turso)

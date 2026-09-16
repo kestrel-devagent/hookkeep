@@ -40,3 +40,16 @@ Canonical live demo remains the Node + trycloudflare tunnel.
    `wrangler.toml` first)
 2. Point marketing / README live URL at `*.workers.dev`
 3. Optionally delete ephemeral tunnel once Workers is green
+
+## Exact CF deploy blocker (2026-09-16)
+
+```
+$ wrangler whoami
+You are not authenticated. Please run `wrangler login`.
+```
+
+- No `CLOUDFLARE_API_TOKEN` / account id on this box
+- `workers/wrangler.toml` still has `REPLACE_WITH_KV_NAMESPACE_ID` placeholders
+- GH Actions workflow mirror: `docs/ci/deploy-workers.yml` (could not push `.github/workflows/` — PAT lacks `workflow` scope)
+- Free path once unblocked: `wrangler login` → `wrangler kv namespace create HOOKKEEP_KV` → paste ids → `wrangler deploy` → `*.workers.dev`
+
