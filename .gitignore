@@ -4,3 +4,4 @@ data/*.tmp
 .env
 .DS_Store
 *.log
+data/*.ndjson

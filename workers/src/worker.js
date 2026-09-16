@@ -72,6 +72,7 @@ function publicInbox(inbox) {
     forwardUrl: inbox.forwardUrl || '',
     alertKeyword: inbox.alertKeyword || '',
     alertEmail: inbox.alertEmail || '',
+    notifyWebhookUrl: inbox.notifyWebhookUrl || '',
     eventCount: inbox.eventCount || 0,
     createdAt: inbox.createdAt,
   };
@@ -88,6 +89,125 @@ function summarizeEvent(e) {
     contentType: e.contentType,
   };
 }
+// ---- Pro alerts: keyword match OR HTTP status >= 400 → notify webhook + log ----
+
+function extractHttpStatus(event) {
+  const pj = event.bodyJson;
+  if (pj && typeof pj === 'object') {
+    for (const k of ['status', 'statusCode', 'httpStatus', 'code']) {
+      const v = pj[k];
+      const n =
+        typeof v === 'number'
+          ? v
+          : typeof v === 'string' && /^\d{3}$/.test(v.trim())
+            ? Number(v.trim())
+            : NaN;
+      if (Number.isFinite(n) && n >= 100 && n <= 599) return n;
+    }
+  }
+  if (event.statusGuess != null) {
+    const n = Number(String(event.statusGuess).trim());
+    if (Number.isFinite(n) && n >= 100 && n <= 599) return n;
+  }
+  const body = event.bodyText || '';
+  const m =
+    /"(?:status|statusCode|httpStatus|code)"\s*:\s*"?(\d{3})"?/i.exec(body) ||
+    /\b(?:status|statusCode|httpStatus)\s*[:=]\s*"?(\d{3})"?/i.exec(body);
+  if (m) {
+    const n = Number(m[1]);
+    if (n >= 100 && n <= 599) return n;
+  }
+  return null;
+}
+
+function alertMatches(inbox, event) {
+  const kw = String(inbox.alertKeyword || '').trim();
+  if (kw) {
+    const kwl = kw.toLowerCase();
+    if (
+      (event.bodyText || '').toLowerCase().includes(kwl) ||
+      (event.statusGuess && String(event.statusGuess).toLowerCase().includes(kwl))
+    ) {
+      return { reason: 'keyword', value: kw };
+    }
+  }
+  const status = extractHttpStatus(event);
+  if (status != null && status >= 400) return { reason: 'status', value: status };
+  return null;
+}
+
+function buildAlertRecord(ws, inbox, event, match) {
+  const to = inbox.alertEmail || ws.email || 'hudson.gouge@projxon.ai';
+  const preview = (event.bodyText || '').slice(0, 300);
+  const subject = `Hookkeep alert: ${inbox.name || inbox.id} (${match.reason}=${match.value})`;
+  const body = [
+    'Hookkeep alert fired',
+    `Inbox: ${inbox.name || inbox.id} (${inbox.id})`,
+    `Event: ${event.id}`,
+    `Reason: ${match.reason} -> ${match.value}`,
+    `Received: ${event.receivedAt}`,
+    `Preview: ${preview}`,
+  ].join('\n');
+  return {
+    id: 'al_' + rand(16),
+    inboxId: inbox.id,
+    inboxName: inbox.name || '',
+    workspaceId: ws.id,
+    eventId: event.id,
+    reason: match.reason,
+    matchedValue: match.value,
+    preview,
+    receivedAt: event.receivedAt,
+    notifyWebhookUrl: inbox.notifyWebhookUrl || '',
+    mailtoHint: `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`,
+    at: new Date().toISOString(),
+  };
+}
+
+async function sendNotifyWebhook(url, record) {
+  let dest;
+  try {
+    dest = new URL(url);
+  } catch {
+    return { ok: false, error: 'bad_url' };
+  }
+  const isLocal = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(dest.hostname);
+  if (dest.protocol !== 'https:' && !(dest.protocol === 'http:' && isLocal)) {
+    return { ok: false, error: 'bad_protocol' };
+  }
+  const content = [
+    `Hookkeep alert: ${record.inboxName || record.inboxId}`,
+    `reason=${record.reason} value=${record.matchedValue}`,
+    `event=${record.eventId} inbox=${record.inboxId}`,
+    `receivedAt=${record.receivedAt}`,
+    `preview: ${record.preview}`,
+  ]
+    .join('\n')
+    .slice(0, 1900);
+  try {
+    const res = await fetch(dest.toString(), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        content,
+        username: 'Hookkeep Alerts',
+        hookkeep: {
+          inboxId: record.inboxId,
+          inboxName: record.inboxName,
+          eventId: record.eventId,
+          reason: record.reason,
+          matchedValue: record.matchedValue,
+          receivedAt: record.receivedAt,
+        },
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    return { ok: res.ok, status: res.status };
+  } catch (e) {
+    return { ok: false, error: 'webhook_failed', message: String(e.message || e) };
+  }
+}
+
 function sanitizeHeaders(headers) {
   const out = {};
   for (const [k, v] of Object.entries(headers || {})) {
@@ -189,22 +309,31 @@ export default {
         inbox.eventCount = (inbox.eventCount || 0) + 1;
         ws.eventsThisMonth = (ws.eventsThisMonth || 0) + 1;
 
-        // Alert stub (log only — real email needs Mailchannels/SES later)
+        // Pro alerts: keyword match OR status >= 400 → notify webhook + console log
         let alert = null;
-        if (limits.alerts && inbox.alertKeyword) {
-          const hay = (event.bodyText || '').toLowerCase();
-          const kw = inbox.alertKeyword.toLowerCase();
-          if (
-            hay.includes(kw) ||
-            (event.statusGuess && String(event.statusGuess).toLowerCase().includes(kw))
-          ) {
+        let alertRecord = null;
+        if (limits.alerts) {
+          const match = alertMatches(inbox, event);
+          if (match) {
+            alertRecord = buildAlertRecord(ws, inbox, event, match);
+            console.log('[hookkeep:alert]', JSON.stringify(alertRecord));
             alert = {
-              matched: inbox.alertKeyword,
-              to: inbox.alertEmail || ws.email || null,
-              note: 'MVP logs alert; email delivery pending',
+              matched: true,
+              reason: alertRecord.reason,
+              matchedValue: alertRecord.matchedValue,
+              queued: true,
+              mailtoHint: alertRecord.mailtoHint,
+              webhookAttempted: Boolean(alertRecord.notifyWebhookUrl),
             };
-            console.log('[hookkeep:alert]', JSON.stringify({ inboxId, eventId, ...alert }));
           }
+        }
+
+        if (alertRecord && alertRecord.notifyWebhookUrl) {
+          ctx.waitUntil(
+            sendNotifyWebhook(alertRecord.notifyWebhookUrl, alertRecord).then((r) => {
+              if (!r.ok) console.log('[hookkeep:alert] webhook failed', JSON.stringify(r));
+            })
+          );
         }
 
         ctx.waitUntil(
@@ -274,6 +403,7 @@ export default {
           forwardUrl: '',
           alertKeyword: '',
           alertEmail: ws.email || '',
+          notifyWebhookUrl: '',
           createdAt: new Date().toISOString(),
           eventCount: 0,
         };
@@ -323,6 +453,7 @@ export default {
           forwardUrl: '',
           alertKeyword: '',
           alertEmail: ws.email || '',
+          notifyWebhookUrl: '',
           createdAt: new Date().toISOString(),
           eventCount: 0,
         };
@@ -346,6 +477,8 @@ export default {
         if (body.forwardUrl != null) inbox.forwardUrl = String(body.forwardUrl).slice(0, 500);
         if (body.alertKeyword != null) inbox.alertKeyword = String(body.alertKeyword).slice(0, 120);
         if (body.alertEmail != null) inbox.alertEmail = String(body.alertEmail).slice(0, 200);
+        if (body.notifyWebhookUrl != null)
+          inbox.notifyWebhookUrl = String(body.notifyWebhookUrl).slice(0, 500);
         await kv.put(`inbox:${inbox.id}`, JSON.stringify(inbox));
         return json({ inbox: { ...publicInbox(inbox), webhookUrl: `${baseUrl(request, env)}/hook/${inbox.id}` } });
       }

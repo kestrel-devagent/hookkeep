@@ -119,6 +119,16 @@ app.get('/api/inboxes/:id/events', (c) => {
   return c.json({ events });
 });
 
+app.get('/api/inboxes/:id/alerts', (c) => {
+  const ws = requireWs(c);
+  if (!ws) return c.json({ error: 'unauthorized' }, 401);
+  const alerts = db.listAlerts(ws, c.req.param('id'), {
+    limit: Number(c.req.query('limit') || 20),
+  });
+  if (!alerts) return c.json({ error: 'not_found' }, 404);
+  return c.json({ alerts });
+});
+
 app.get('/api/events/:id', (c) => {
   const ws = requireWs(c);
   if (!ws) return c.json({ error: 'unauthorized' }, 401);
@@ -188,7 +198,25 @@ async function ingest(c) {
     contentType: c.req.header('content-type') || '',
   });
   if (!result.ok) return c.json(result, 404);
-  return c.json({ ok: true, id: result.eventId, received: true }, 200);
+  const resp = { ok: true, id: result.eventId, received: true };
+  if (result.alert) {
+    const a = result.alert;
+    resp.alert = {
+      matched: true,
+      reason: a.reason,
+      matchedValue: a.matchedValue,
+      queued: true,
+      mailtoHint: a.mailtoHint,
+    };
+    if (a.notifyWebhookUrl) {
+      resp.alert.webhookAttempted = true;
+      const wh = await db.sendNotifyWebhook(a.notifyWebhookUrl, a);
+      resp.alert.webhookOk = wh.ok;
+      if (wh.status != null) resp.alert.webhookStatus = wh.status;
+      if (wh.error) resp.alert.webhookError = wh.error;
+    }
+  }
+  return c.json(resp, 200);
 }
 
 app.all('/hook/:inboxId', ingest);

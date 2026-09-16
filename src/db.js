@@ -13,6 +13,8 @@ const id16 = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 16);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.HOOKKEEP_DATA || path.join(__dirname, '..', 'data');
 const DB_PATH = path.join(DATA_DIR, 'hookkeep.json');
+const ALERTS_PATH = path.join(DATA_DIR, 'alerts.ndjson');
+const PAY_CONTACT = 'hudson.gouge@projxon.ai';
 
 const TIERS = {
   free: { name: 'Free', maxInboxes: 1, maxEventsKeep: 50, maxEventsMonth: 500, alerts: false },
@@ -84,6 +86,7 @@ function makeInbox(db, ws, { name = 'Inbox' } = {}) {
     forwardUrl: '',
     alertKeyword: '',
     alertEmail: ws.email || '',
+    notifyWebhookUrl: '',
     createdAt: new Date().toISOString(),
     eventCount: 0,
   };
@@ -128,6 +131,8 @@ export function updateInbox(ws, inboxId, patch) {
   if (patch.forwardUrl != null) inbox.forwardUrl = String(patch.forwardUrl).slice(0, 500);
   if (patch.alertKeyword != null) inbox.alertKeyword = String(patch.alertKeyword).slice(0, 120);
   if (patch.alertEmail != null) inbox.alertEmail = String(patch.alertEmail).slice(0, 200);
+  if (patch.notifyWebhookUrl != null)
+    inbox.notifyWebhookUrl = String(patch.notifyWebhookUrl).slice(0, 500);
   write(db);
   return publicInbox(inbox);
 }
@@ -186,23 +191,174 @@ export function ingestEvent(inboxId, { method, headers, bodyText, contentType })
     delete db.events[old.id];
   }
 
-  // Alert stub (log only for MVP — real email needs free SMTP later)
+  // Pro alerts: keyword match OR HTTP status >= 400 → NDJSON queue + notify webhook
+  // (webhook POST itself is fired by the caller via sendNotifyWebhook — see alert.notifyWebhookUrl)
   let alert = null;
-  if (limits.alerts && inbox.alertKeyword) {
-    const hay = (event.bodyText || '').toLowerCase();
-    const kw = inbox.alertKeyword.toLowerCase();
-    if (hay.includes(kw) || (event.statusGuess && String(event.statusGuess).toLowerCase().includes(kw))) {
-      alert = {
-        matched: inbox.alertKeyword,
-        to: inbox.alertEmail || ws.email || null,
-        note: 'MVP logs alert; email delivery pending SMTP',
-      };
-      console.log('[hookkeep:alert]', JSON.stringify({ inboxId, eventId, ...alert }));
+  if (limits.alerts) {
+    const match = alertMatches(inbox, event);
+    if (match) {
+      const record = buildAlertRecord(ws, inbox, event, match);
+      try {
+        fs.appendFileSync(ALERTS_PATH, JSON.stringify(record) + '\n');
+      } catch {
+        /* ignore disk errors on alert log */
+      }
+      console.log('[hookkeep:alert]', JSON.stringify(record));
+      alert = record;
     }
   }
 
   write(db);
   return { ok: true, eventId, alert, overMonth: ws.eventsThisMonth > limits.maxEventsMonth };
+}
+
+/** Extract a numeric HTTP-ish status (100-599) from an ingested event, or null. */
+export function extractHttpStatus(event) {
+  const pj = event.bodyJson;
+  if (pj && typeof pj === 'object') {
+    for (const k of ['status', 'statusCode', 'httpStatus', 'code']) {
+      const v = pj[k];
+      const n =
+        typeof v === 'number'
+          ? v
+          : typeof v === 'string' && /^\d{3}$/.test(v.trim())
+            ? Number(v.trim())
+            : NaN;
+      if (Number.isFinite(n) && n >= 100 && n <= 599) return n;
+    }
+  }
+  if (event.statusGuess != null) {
+    const n = Number(String(event.statusGuess).trim());
+    if (Number.isFinite(n) && n >= 100 && n <= 599) return n;
+  }
+  const body = event.bodyText || '';
+  const m =
+    /"(?:status|statusCode|httpStatus|code)"\s*:\s*"?(\d{3})"?/i.exec(body) ||
+    /\b(?:status|statusCode|httpStatus)\s*[:=]\s*"?(\d{3})"?/i.exec(body);
+  if (m) {
+    const n = Number(m[1]);
+    if (n >= 100 && n <= 599) return n;
+  }
+  return null;
+}
+
+/** Returns { reason: 'keyword'|'status', value } when an event should fire a Pro alert. */
+export function alertMatches(inbox, event) {
+  const kw = String(inbox.alertKeyword || '').trim();
+  if (kw) {
+    const kwl = kw.toLowerCase();
+    if (
+      (event.bodyText || '').toLowerCase().includes(kwl) ||
+      (event.statusGuess && String(event.statusGuess).toLowerCase().includes(kwl))
+    ) {
+      return { reason: 'keyword', value: kw };
+    }
+  }
+  const status = extractHttpStatus(event);
+  if (status != null && status >= 400) {
+    return { reason: 'status', value: status };
+  }
+  return null;
+}
+
+/** Full alert record — appended to data/alerts.ndjson and used for webhook + mailto. */
+export function buildAlertRecord(ws, inbox, event, match) {
+  const to = inbox.alertEmail || ws.email || PAY_CONTACT;
+  const preview = (event.bodyText || '').slice(0, 300);
+  const subject = `Hookkeep alert: ${inbox.name || inbox.id} (${match.reason}=${match.value})`;
+  const body = [
+    'Hookkeep alert fired',
+    `Inbox: ${inbox.name || inbox.id} (${inbox.id})`,
+    `Event: ${event.id}`,
+    `Reason: ${match.reason} -> ${match.value}`,
+    `Received: ${event.receivedAt}`,
+    `Preview: ${preview}`,
+  ].join('\n');
+  return {
+    id: 'al_' + id16(),
+    inboxId: inbox.id,
+    inboxName: inbox.name || '',
+    workspaceId: ws.id,
+    eventId: event.id,
+    reason: match.reason,
+    matchedValue: match.value,
+    preview,
+    receivedAt: event.receivedAt,
+    notifyWebhookUrl: inbox.notifyWebhookUrl || '',
+    mailtoHint: `mailto:${to}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`,
+    at: new Date().toISOString(),
+  };
+}
+
+/**
+ * POST a Discord/Slack-friendly payload to the inbox notify webhook.
+ * ~8s timeout; never throws — returns { ok, status? } or { ok:false, error }.
+ */
+export async function sendNotifyWebhook(url, record) {
+  let dest;
+  try {
+    dest = new URL(url);
+  } catch {
+    return { ok: false, error: 'bad_url' };
+  }
+  const isLocal = ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(dest.hostname);
+  if (dest.protocol !== 'https:' && !(dest.protocol === 'http:' && isLocal)) {
+    return { ok: false, error: 'bad_protocol' };
+  }
+  const content = [
+    `Hookkeep alert: ${record.inboxName || record.inboxId}`,
+    `reason=${record.reason} value=${record.matchedValue}`,
+    `event=${record.eventId} inbox=${record.inboxId}`,
+    `receivedAt=${record.receivedAt}`,
+    `preview: ${record.preview}`,
+  ]
+    .join('\n')
+    .slice(0, 1900);
+  try {
+    const res = await fetch(dest.toString(), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        content,
+        username: 'Hookkeep Alerts',
+        hookkeep: {
+          inboxId: record.inboxId,
+          inboxName: record.inboxName,
+          eventId: record.eventId,
+          reason: record.reason,
+          matchedValue: record.matchedValue,
+          receivedAt: record.receivedAt,
+        },
+      }),
+      signal: AbortSignal.timeout(8000),
+    });
+    return { ok: res.ok, status: res.status };
+  } catch (e) {
+    return { ok: false, error: 'webhook_failed', message: String(e.message || e) };
+  }
+}
+
+/** Last N alert records for an inbox from data/alerts.ndjson (newest first). */
+export function listAlerts(ws, inboxId, { limit = 20 } = {}) {
+  const db = read();
+  const inbox = db.inboxes[inboxId];
+  if (!inbox || inbox.workspaceId !== ws.id) return null;
+  let lines;
+  try {
+    lines = fs.readFileSync(ALERTS_PATH, 'utf8').split('\n').filter(Boolean);
+  } catch {
+    return [];
+  }
+  const rows = [];
+  for (const line of lines) {
+    try {
+      const r = JSON.parse(line);
+      if (r.inboxId === inboxId) rows.push(r);
+    } catch {
+      /* skip bad line */
+    }
+  }
+  return rows.slice(-Math.min(limit, 200)).reverse();
 }
 
 export function listEvents(ws, inboxId, { q = '', limit = 50 } = {}) {
@@ -369,6 +525,7 @@ function publicInbox(inbox) {
     forwardUrl: inbox.forwardUrl || '',
     alertKeyword: inbox.alertKeyword || '',
     alertEmail: inbox.alertEmail || '',
+    notifyWebhookUrl: inbox.notifyWebhookUrl || '',
     eventCount: inbox.eventCount || 0,
     createdAt: inbox.createdAt,
   };

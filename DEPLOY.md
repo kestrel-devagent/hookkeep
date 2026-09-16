@@ -32,7 +32,7 @@ npm install --omit=dev
 PORT=8787 HOOKKEEP_PUBLIC_URL=https://YOUR_HOST HOOKKEEP_DATA=/var/data npm start
 ```
 
-Mount a persistent volume at `HOOKKEEP_DATA`.
+Mount a persistent volume at `HOOKKEEP_DATA` — this also persists `alerts.ndjson` (Pro alert queue). Pro alerts need no extra env or SMTP: users set a Discord/Slack `notifyWebhookUrl` per inbox, and every alert also lands in `alerts.ndjson` + `[hookkeep:alert]` logs.
 
 ## 3) Cloudflare Workers + KV (`workers/`)
 

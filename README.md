@@ -48,11 +48,22 @@ npm test
 - `POST /api/workspace` → create workspace + first inbox + owner token
 - `POST /hook/:inboxId` → **public ingest** (any method)
 - `GET /api/workspace` + header `x-hookkeep-token`
+- `PATCH /api/inboxes/:id` `{ name?, forwardUrl?, alertKeyword?, alertEmail?, notifyWebhookUrl? }`
 - `GET /api/inboxes/:id/events?q=`
+- `GET /api/inboxes/:id/alerts?limit=20` → recent Pro alert records
 - `GET /api/events/:id`
 - `POST /api/events/:id/replay` `{ "targetUrl?: string" }`
 - `POST /api/unlock` `{ "code" }`
 - `POST /api/waitlist` `{ "email", "note?" }`
+
+### Pro alerts
+
+On Pro workspaces, an ingested event fires an alert when the inbox `alertKeyword`
+matches the body/statusGuess **or** an HTTP status ≥ 400 is extracted from the
+payload. Delivery: POST to inbox `notifyWebhookUrl` (Discord/Slack-compatible
+`{ "content": … }`, ~8s timeout), one line appended to `data/alerts.ndjson`
+(+ `[hookkeep:alert]` log), and a `mailtoHint` fallback returned in the alert
+record and ingest response. Free tier never fires alerts.
 
 ## Deploy notes
 

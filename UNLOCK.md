@@ -35,10 +35,25 @@ console.log(code);
 
 After redeem, `usedBy` is set to workspace id — code cannot be reused.
 
+## Pro alerts (shipped)
+
+Once `tier=paid`, alerts fire on ingested events when **either**:
+
+- inbox `alertKeyword` matches the body/statusGuess (case-insensitive), **or**
+- an HTTP-ish status ≥ 400 is found in the payload (`status`/`statusCode`/`httpStatus`/`code` fields, `statusGuess`, or `"status":500`-style body text).
+
+Delivery (no SMTP required):
+
+1. **Notify webhook** — if inbox `notifyWebhookUrl` is set (https, or localhost for dev), Hookkeep POSTs a Discord/Slack-compatible `{ "content": "…" }` JSON body (~8s timeout, failures never break ingest).
+2. **`data/alerts.ndjson`** — every alert appended as one NDJSON line + `[hookkeep:alert]` console log (greppable ops queue).
+3. **Mailto hint** — the alert record and ingest API response include a `mailtoHint` (to `alertEmail` → workspace email → pay contact) with prefilled subject/body.
+
+Free workspaces get **no** alerts even if the fields are set.
+
 ## What's left for real subscriptions
 
 1. Stripe Checkout (or PayPal Subscriptions) webhook → auto-set `tier=paid`
 2. Recurring billing + grace period on cancel
-3. Real email alerts (Resend/Mailgun free tier or SMTP)
+3. Optional SMTP email delivery (Resend/Mailgun free tier) — webhook + mailto covers MVP
 4. Durable multi-region store (Cloudflare D1 / Turso)
 5. Auth (magic link) so owner token isn't the only login

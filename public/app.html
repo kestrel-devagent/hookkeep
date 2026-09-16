@@ -40,7 +40,7 @@
       <button class="btn btn-sm" id="btn-copy-token">Copy token</button>
     </div>
     <div id="upgrade-banner" class="upgrade-banner hidden">
-      <span>Free tier limit nearby — unlock Pro ($9/mo PayPal) for 5 inboxes.</span>
+      <span>Free tier limit nearby — unlock Pro ($9/mo PayPal) for 5 inboxes + real alerts (keyword or status ≥ 400 → Discord/Slack webhook).</span>
       <a class="btn btn-sm btn-primary" href="/#pay">How to pay</a>
     </div>
 
@@ -56,6 +56,11 @@
         <input id="forward-url" type="url" placeholder="https://n8n.example/webhook/…" style="width:100%;margin:0.35rem 0" />
         <label class="muted" style="font-size:0.8rem">Alert keyword (Pro)</label>
         <input id="alert-kw" type="text" placeholder="error / failed / 500" style="width:100%;margin:0.35rem 0" />
+        <label class="muted" style="font-size:0.8rem">Notify webhook URL (Pro)</label>
+        <input id="notify-url" type="url" placeholder="Discord/Slack incoming webhook" style="width:100%;margin:0.35rem 0" />
+        <label class="muted" style="font-size:0.8rem">Alert email (optional mailto fallback)</label>
+        <input id="alert-email" type="email" placeholder="you@company.com" style="width:100%;margin:0.35rem 0" />
+        <p id="alert-hint" class="muted" style="font-size:0.75rem;margin:0.25rem 0"></p>
         <button class="btn btn-sm" id="btn-save-inbox" style="width:100%;margin-top:0.35rem;justify-content:center">Save inbox</button>
       </aside>
 
@@ -170,7 +175,12 @@ function render() {
     $('webhook-url').textContent = active.webhookUrl;
     $('forward-url').value = active.forwardUrl || '';
     $('alert-kw').value = active.alertKeyword || '';
+    $('notify-url').value = active.notifyWebhookUrl || '';
+    $('alert-email').value = active.alertEmail || '';
   }
+  $('alert-hint').textContent = ws.tier === 'paid'
+    ? 'Pro alerts fire on keyword match or HTTP status ≥ 400 → notify webhook + alerts log + mailto hint.'
+    : 'Unlock Pro for webhook/Discord/Slack alerts';
 }
 
 async function loadEvents() {
@@ -268,6 +278,8 @@ $('btn-save-inbox').onclick = async () => {
     body: JSON.stringify({
       forwardUrl: $('forward-url').value,
       alertKeyword: $('alert-kw').value,
+      notifyWebhookUrl: $('notify-url').value,
+      alertEmail: $('alert-email').value,
     }),
   });
   await loadWorkspace();
