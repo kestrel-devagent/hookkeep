@@ -290,11 +290,28 @@ export function addWaitlist({ email, note = '' }) {
     err.code = 'bad_email';
     throw err;
   }
-  if (!db.waitlist.some((w) => w.email === em)) {
-    db.waitlist.push({ email: em, note: String(note).slice(0, 300), at: new Date().toISOString() });
+  const entry = { email: em, note: String(note).slice(0, 300), at: new Date().toISOString() };
+  const isNew = !db.waitlist.some((w) => w.email === em);
+  if (isNew) {
+    db.waitlist.push(entry);
     write(db);
   }
-  return { ok: true };
+  // Durable ops log (one line per signup) — greppable / emailable without SMTP
+  try {
+    fs.appendFileSync(
+      path.join(DATA_DIR, 'waitlist.ndjson'),
+      JSON.stringify({ ...entry, duplicate: !isNew }) + '\n'
+    );
+  } catch {
+    /* ignore disk errors on log */
+  }
+  return { ok: true, isNew, count: db.waitlist.length };
+}
+
+/** Operator helper — list waitlist (local/scripts only; not exposed publicly). */
+export function listWaitlist() {
+  const db = read();
+  return db.waitlist || [];
 }
 
 export function redeemUnlock(ws, code) {

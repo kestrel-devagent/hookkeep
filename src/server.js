@@ -151,8 +151,20 @@ app.post('/api/unlock', async (c) => {
 app.post('/api/waitlist', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   try {
-    db.addWaitlist({ email: body.email, note: body.note });
-    return c.json({ ok: true, message: 'You are on the list. We will email when Pro seats open.' });
+    const result = db.addWaitlist({ email: body.email, note: body.note });
+    const note = String(body.note || '').slice(0, 200);
+    const subject = encodeURIComponent('Hookkeep waitlist');
+    const mailBody = encodeURIComponent(
+      `New waitlist signup\nEmail: ${String(body.email || '').trim()}\nNote: ${note}\n`
+    );
+    return c.json({
+      ok: true,
+      isNew: result.isNew,
+      message: result.isNew
+        ? 'You are on the list. Optional: open the mailto to ping Kestrel Ops.'
+        : 'You were already on the list — still recorded.',
+      notifyMailto: `mailto:hudson.gouge@projxon.ai?subject=${subject}&body=${mailBody}`,
+    });
   } catch {
     return c.json({ error: 'bad_email' }, 400);
   }

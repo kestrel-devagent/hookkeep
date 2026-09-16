@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hookkeep — Hosted webhook inbox | Kestrel Ops</title>
+<meta name="description" content="HTTPS webhook inbox for n8n. Capture, search, replay. Free + Pro $9/mo via PayPal." />
+<style>
+:root{--bg:#0b1220;--panel:#121a2b;--text:#e8eefc;--muted:#9aa8c7;--accent:#5b8cff;--accent2:#3dd6c6;--border:#243049}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:radial-gradient(1000px 500px at 10% -10%,#1a2a4a 0%,var(--bg) 55%);color:var(--text);min-height:100vh}
+a{color:var(--accent2)}.wrap{max-width:720px;margin:0 auto;padding:2.5rem 1.25rem 4rem}
+.logo{display:inline-grid;place-items:center;width:40px;height:40px;border-radius:10px;font-weight:700;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#041018}
+h1{font-size:clamp(1.8rem,4vw,2.4rem);line-height:1.15}
+.lede{color:var(--muted);font-size:1.1rem}
+.cta{display:flex;flex-wrap:wrap;gap:.75rem;margin:1.5rem 0}
+.btn{display:inline-flex;align-items:center;padding:.65rem 1rem;border-radius:999px;border:1px solid var(--border);background:var(--panel);color:var(--text);text-decoration:none;font-weight:600}
+.btn-primary{background:linear-gradient(135deg,var(--accent),#4666d8);border-color:transparent;color:#fff}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:1.25rem;margin:1rem 0}
+.fine{color:var(--muted);font-size:.9rem}code{background:#0a1020;padding:.1rem .35rem;border-radius:4px}
+ul{color:var(--muted)}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <p><span class="logo">HK</span> <strong>Hookkeep</strong> <span class="fine">by Kestrel Ops</span></p>
+  <h1>Stop losing webhook payloads while you debug.</h1>
+  <p class="lede">Instant HTTPS URL per inbox. Store events, search them, and replay to n8n when your workflow is ready.</p>
+  <div class="cta">
+    <a class="btn btn-primary" id="demo" href="https://duo-frost-gonna-surgery.trycloudflare.com">Open live demo</a>
+    <a class="btn" href="https://github.com/kestrel-devagent/hookkeep">GitHub</a>
+    <a class="btn" href="https://duo-frost-gonna-surgery.trycloudflare.com/app.html">Open inbox</a>
+  </div>
+  <div class="card">
+    <h2 style="margin-top:0">Pricing</h2>
+    <ul>
+      <li><strong>Free</strong> — 1 inbox, last 50 events, replay</li>
+      <li><strong>Pro $9/mo</strong> — 5 inboxes, 5k events/mo, alert stub</li>
+    </ul>
+    <p class="fine">PayPal <code>hudson.gouge@projxon.ai</code> note <code>Hookkeep Pro $9</code> → email txn ID → unlock code in dashboard.</p>
+  </div>
+  <div class="card">
+    <h2 style="margin-top:0">Self-host</h2>
+    <p class="fine">Node MVP + Workers stub in the repo. See <a href="https://github.com/kestrel-devagent/hookkeep/blob/main/DEPLOY.md">DEPLOY.md</a>. Demo tunnel hostnames rotate; this Pages site stays put.</p>
+  </div>
+  <p class="fine">Contact: <a href="mailto:hudson.gouge@projxon.ai">hudson.gouge@projxon.ai</a> · Related: <a href="https://kestrel-devagent.github.io/n8n-webhook-catcher/">Free Catcher</a></p>
+</main>
+<script>
+// Optional: override demo URL without rebuilding marketing copy
+fetch('./demo.json').then(r=>r.json()).then(j=>{
+  if(j&&j.demoUrl){
+    document.getElementById('demo').href=j.demoUrl;
+    document.querySelectorAll('a.btn').forEach(a=>{
+      if(a.textContent.includes('inbox')) a.href=j.demoUrl.replace(/\/$/,'')+'/app.html';
+    });
+  }
+}).catch(()=>{});
+</script>
+</body>
+</html>

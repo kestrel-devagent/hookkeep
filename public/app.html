@@ -39,6 +39,10 @@
       <button class="btn btn-sm" id="btn-unlock">Unlock Pro</button>
       <button class="btn btn-sm" id="btn-copy-token">Copy token</button>
     </div>
+    <div id="upgrade-banner" class="upgrade-banner hidden">
+      <span>Free tier limit nearby — unlock Pro ($9/mo PayPal) for 5 inboxes.</span>
+      <a class="btn btn-sm btn-primary" href="/#pay">How to pay</a>
+    </div>
 
     <div class="layout">
       <aside class="side">
@@ -143,6 +147,14 @@ function render() {
   tier.textContent = ws.tierName + (ws.tier === 'paid' ? '' : ' tier');
   tier.className = 'pill' + (ws.tier === 'paid' ? ' pro' : '');
   $('usage').textContent = `${ws.eventsThisMonth}/${ws.limits.maxEventsMonth} events this month · ${state.inboxes.length}/${ws.limits.maxInboxes} inboxes`;
+  const banner = $('upgrade-banner');
+  if (banner) {
+    const near = ws.tier !== 'paid' && (
+      state.inboxes.length >= ws.limits.maxInboxes ||
+      ws.eventsThisMonth >= Math.floor(ws.limits.maxEventsMonth * 0.7)
+    );
+    banner.classList.toggle('hidden', !near);
+  }
 
   const list = $('inbox-list');
   list.innerHTML = '';

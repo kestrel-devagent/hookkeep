@@ -40,7 +40,16 @@ Code is ready under `workers/` (zero npm deps). Needs a Cloudflare account + KV 
 
 See `workers/README.md` and `workers/STATUS.md`.
 
-## 4) Local + quick tunnel (current demo)
+## 4) GitHub Pages marketing (durable URL)
+
+`docs/` is the static marketing site. Enable Pages: Settings → Pages → Deploy from branch `main` / folder `/docs`.
+
+- Site: `https://kestrel-devagent.github.io/hookkeep/`
+- Point the CTA at the current demo via `docs/demo.json` (`demoUrl`).
+
+This is marketing-only (no ingest API). Host the Node app separately.
+
+## 5) Local + quick tunnel (current demo)
 
 ```bash
 npm start   # :8787

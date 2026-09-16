@@ -4,11 +4,15 @@
 
 Get a durable HTTPS webhook URL, store payloads, search recent events, open details, and replay/forward to your n8n webhook.
 
+## Marketing site (durable)
+
+**GitHub Pages:** https://kestrel-devagent.github.io/hookkeep/
+
 ## Live demo (ephemeral tunnel)
 
-**URL:** https://prospects-comprehensive-jackie-approximately.trycloudflare.com
+**URL:** https://duo-frost-gonna-surgery.trycloudflare.com
 
-Quick Cloudflare tunnel in front of the Node MVP on the build box. Hostname may change if the tunnel restarts — prefer **HF Space Docker / any Node host** (see [DEPLOY.md](./DEPLOY.md)). Workers port lives in `workers/` (needs CF login to publish).
+Quick Cloudflare tunnel in front of the Node MVP on the build box. Hostname may change if the tunnel restarts — update `docs/demo.json` when it does. Prefer **HF Space Docker / any Node host** (see [DEPLOY.md](./DEPLOY.md)). Workers port lives in `workers/` (needs CF login to publish).
 
 ## Pricing (MVP)
 

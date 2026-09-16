@@ -21,6 +21,8 @@
   <nav>
     <a href="#how">How it works</a>
     <a href="#pricing">Pricing</a>
+    <a href="#waitlist">Waitlist</a>
+    <span id="live-status" class="pill" title="Local/API health">…</span>
     <a href="/app.html" class="btn btn-sm">Open inbox</a>
   </nav>
 </header>
@@ -43,6 +45,7 @@
       <li>✓ Pro unlock via PayPal $9 (manual code — no Stripe tax yet)</li>
     </ul>
     <p id="start-msg" class="msg" hidden></p>
+    <p class="fine hero-note">Marketing site (always on): <a href="https://kestrel-devagent.github.io/hookkeep/">kestrel-devagent.github.io/hookkeep</a> · Pay/contact <code>hudson.gouge@projxon.ai</code></p>
   </section>
 
   <section id="how" class="grid3">
@@ -115,7 +118,7 @@
     </details>
   </section>
 
-  <section class="waitlist">
+  <section id="waitlist" class="waitlist">
     <h2>Waitlist / contact</h2>
     <form id="wait-form" class="row">
       <input type="email" name="email" required placeholder="you@company.com" />
@@ -167,9 +170,30 @@ document.getElementById('wait-form').onsubmit = async (ev) => {
   const data = await res.json();
   const m = document.getElementById('wait-msg');
   m.hidden = false;
-  m.textContent = res.ok ? data.message : 'Invalid email';
-  if (res.ok) ev.target.reset();
+  if (!res.ok) {
+    m.textContent = 'Invalid email';
+    return;
+  }
+  const mail = data.notifyMailto
+    ? ` <a href="${data.notifyMailto}">Email Kestrel Ops</a> (optional ping).`
+    : '';
+  m.innerHTML = (data.message || 'Saved.') + mail + ' Stored on this host for fulfill.';
+  ev.target.reset();
 };
+// Live status badge (works on Node host / local; GH Pages static has no API)
+(async () => {
+  const el = document.getElementById('live-status');
+  if (!el) return;
+  try {
+    const r = await fetch('/api/health', { cache: 'no-store' });
+    const j = await r.json();
+    el.textContent = r.ok && j.ok ? 'API live' : 'API down';
+    el.className = 'pill' + (r.ok && j.ok ? ' pro' : '');
+  } catch {
+    el.textContent = 'Static page';
+    el.className = 'pill';
+  }
+})();
 </script>
 </body>
 </html>
