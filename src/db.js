@@ -94,6 +94,46 @@ function makeInbox(db, ws, { name = 'Inbox' } = {}) {
   return inbox;
 }
 
+export function getWorkspaceByIdOrEmail({ workspaceId, email } = {}) {
+  const db = read();
+  if (workspaceId && db.workspaces[workspaceId]) return db.workspaces[workspaceId];
+  const em = String(email || '').trim().toLowerCase();
+  if (em) {
+    return Object.values(db.workspaces).find((w) => w.email === em) || null;
+  }
+  return null;
+}
+
+/** Mint a fresh one-time unlock code (used by the billing fulfill bridge + ops). */
+export function mintUnlockCode({ tier = 'paid', note = 'stripe' } = {}) {
+  const db = read();
+  const code = 'HOOKKEEP-PRO-' + nanoid(8).toUpperCase();
+  db.unlockCodes[code] = { tier, usedBy: null, note, createdAt: new Date().toISOString() };
+  write(db);
+  return code;
+}
+
+/** Cheap health info: data dir + whether a write round-trip works. */
+export function persistStatus() {
+  let persistOk = false;
+  try {
+    ensure();
+    const probe = DB_PATH + '.probe';
+    fs.writeFileSync(probe, 'ok');
+    fs.unlinkSync(probe);
+    persistOk = true;
+  } catch {
+    persistOk = false;
+  }
+  let workspaceCount = 0;
+  try {
+    workspaceCount = Object.keys(read().workspaces || {}).length;
+  } catch {
+    /* ignore */
+  }
+  return { dataDir: DATA_DIR, persistOk, workspaceCount };
+}
+
 export function getWorkspaceByToken(token) {
   if (!token) return null;
   const db = read();

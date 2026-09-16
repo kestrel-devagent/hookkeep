@@ -14,6 +14,7 @@ binding = "HOOKKEEP_KV"
 id = "REPLACE_WITH_KV_NAMESPACE_ID"
 preview_id = "REPLACE_WITH_PREVIEW_KV_NAMESPACE_ID"
 
-# Optional: override the public base URL used in webhookUrl responses
+# Optional vars
 # [vars]
-# HOOKKEEP_PUBLIC_URL = "https://hookkeep.<your-subdomain>.workers.dev"
+# HOOKKEEP_PUBLIC_URL = "https://hookkeep.<your-subdomain>.workers.dev"  # public base for webhookUrl responses
+# BILLING_PUBLIC_URL = "https://<stripe-billing-host>"                 # makes /subscribe redirect to Stripe billing

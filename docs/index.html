@@ -51,10 +51,17 @@ ul{color:var(--muted)}
 // Optional: override demo URL without rebuilding marketing copy
 fetch('./demo.json').then(r=>r.json()).then(j=>{
   if(j&&j.demoUrl){
+    const base=j.demoUrl.replace(/\/$/,'');
     document.getElementById('demo').href=j.demoUrl;
     document.querySelectorAll('a.btn').forEach(a=>{
-      if(a.textContent.includes('inbox')) a.href=j.demoUrl.replace(/\/$/,'')+'/app.html';
+      if(a.textContent.includes('inbox')) a.href=base+'/app.html';
     });
+    const cta=document.getElementById('stripe-checkout-cta');
+    if(cta) cta.href=base+'/subscribe?product=hookkeep';
+  }
+  if(j&&j.billingUrl){
+    const cta=document.getElementById('stripe-checkout-cta');
+    if(cta) cta.href=j.billingUrl.replace(/\/$/,'')+'/subscribe?product=hookkeep';
   }
 }).catch(()=>{});
 </script>

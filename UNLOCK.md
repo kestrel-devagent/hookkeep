@@ -48,9 +48,21 @@ Delivery (no SMTP required):
 
 Free workspaces get **no** alerts even if the fields are set.
 
+## Billing bridge (shipped, opt-in)
+
+`POST /api/stripe/fulfill` with header `x-fulfill-secret: $HOOKKEEP_FULFILL_SECRET`
+lets the stripe-billing app auto-unlock after `checkout.session.completed`:
+
+```json
+{ "workspaceId": "ws_…", "sessionId": "cs_…" }   // mints + redeems a fresh code
+{ "email": "u@x.com", "code": "HOOKKEEP-PRO-…" } // redeems an existing code
+```
+
+Returns 503 until `HOOKKEEP_FULFILL_SECRET` is set — safe to leave off.
+
 ## What's left for real subscriptions
 
-1. Stripe Checkout webhook → auto-set `tier=paid` (see `/workspace/ship/stripe-billing-2026-09-16/`)
+1. Wire stripe-billing's `checkout.session.completed` → `POST /api/stripe/fulfill` (see `/workspace/ship/stripe-billing-2026-09-16/`)
 2. Recurring billing + grace period on cancel
 3. Optional SMTP email delivery (Resend/Mailgun free tier) — webhook + mailto covers MVP
 4. Durable multi-region store (Cloudflare D1 / Turso)

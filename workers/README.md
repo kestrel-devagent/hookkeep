@@ -14,10 +14,12 @@ Brand: **Kestrel Ops / Hookkeep**.
 - `GET /api/events/:id` — event detail
 - `POST /api/events/:id/replay` — forward stored request to `targetUrl` or inbox `forwardUrl`
 - `POST /api/unlock` — redeem Pro unlock code (5 inboxes, 5k events/mo, keyword alerts)
+- `GET /api/inboxes/:id/alerts?limit=` — recent Pro alert records (KV, 30-day TTL)
 - `POST /api/waitlist` — Pro waitlist
 - `GET /api/pricing`, `GET /api/health`
+- `GET /subscribe` — 302 to `BILLING_PUBLIC_URL/subscribe?product=hookkeep` when set, else a helpful 503 page
 
-Pro payment: PayPal to `hudson.gouge@projxon.ai`, note `Hookkeep Pro $9`.
+Pro payment: Stripe Checkout $9/mo via the stripe-billing host (set `BILLING_PUBLIC_URL`); fallback is an operator-minted unlock code via email `hudson.gouge@projxon.ai`.
 
 ## Deploy (free workers.dev)
 
@@ -37,6 +39,17 @@ npx wrangler@latest deploy
 
 You get `https://hookkeep.<your-subdomain>.workers.dev` — no npm install needed
 (the worker has zero dependencies; wrangler is invoked via npx).
+
+### Deploy via GitHub Actions (optional)
+
+`.github/workflows/deploy-workers.yml` deploys on pushes that touch `workers/`
+or `public/` — but only when these repo secrets exist (it no-ops otherwise):
+
+- `CLOUDFLARE_API_TOKEN` — API token with Workers + KV edit perms
+- `CLOUDFLARE_ACCOUNT_ID`
+
+You still need to create the KV namespace once and paste the ids into
+`wrangler.toml` before the first deploy.
 
 ### Seed extra unlock codes (optional)
 

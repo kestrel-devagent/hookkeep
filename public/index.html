@@ -86,7 +86,7 @@
           <li>Real alerts — keyword or HTTP status ≥ 400 → your Discord/Slack webhook + mailto fallback</li>
           <li>Email support</li>
         </ul>
-        <a class="btn btn-primary" href="#pay">Pay $9 — unlock Pro</a>
+        <a class="btn btn-primary" href="/subscribe?product=hookkeep">Pay $9 — unlock Pro</a>
       </div>
     </div>
   </section>
@@ -149,8 +149,8 @@ async function createWorkspace() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'failed');
     localStorage.setItem('hookkeep_token', data.ownerToken);
-    msg.innerHTML = `Inbox ready. Save this token: <code>${data.ownerToken}</code> — <a href="/app.html?token=${encodeURIComponent(data.ownerToken)}">Open dashboard →</a>`;
-    location.href = '/app.html?token=' + encodeURIComponent(data.ownerToken);
+    msg.innerHTML = `Inbox ready. Save this token: <code>${data.ownerToken}</code> — <a href="/app.html?token=${encodeURIComponent(data.ownerToken)}&new=1">Open dashboard →</a>`;
+    location.href = '/app.html?token=' + encodeURIComponent(data.ownerToken) + '&new=1';
   } catch (e) {
     msg.textContent = 'Could not create inbox: ' + e.message;
   }

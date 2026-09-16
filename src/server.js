@@ -14,6 +14,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
 const PORT = Number(process.env.PORT || 8787);
 const PUBLIC_BASE = (process.env.HOOKKEEP_PUBLIC_URL || '').replace(/\/$/, '');
+const BILLING_PUBLIC_URL = (
+  process.env.BILLING_PUBLIC_URL ||
+  process.env.STRIPE_BILLING_URL ||
+  ''
+).replace(/\/$/, '');
+const FULFILL_SECRET = process.env.HOOKKEEP_FULFILL_SECRET || '';
 
 const app = new Hono();
 app.use('*', cors());
@@ -41,7 +47,14 @@ function baseUrl(c) {
 }
 
 app.get('/api/health', (c) =>
-  c.json({ ok: true, service: 'hookkeep', brand: 'Kestrel Ops', ts: new Date().toISOString() })
+  c.json({
+    ok: true,
+    service: 'hookkeep',
+    brand: 'Kestrel Ops',
+    ts: new Date().toISOString(),
+    ...db.persistStatus(),
+    billing: BILLING_PUBLIC_URL || null,
+  })
 );
 
 app.get('/api/pricing', (c) =>
@@ -55,14 +68,68 @@ app.get('/api/pricing', (c) =>
       eventsMonth: 5000,
       alerts: true,
       pay: {
-        method: 'PayPal',
-        email: 'hudson.gouge@projxon.ai',
-        note: 'Hookkeep Pro $9',
-        after: 'Email the same address with your PayPal transaction ID + workspace email to receive an unlock code.',
+        method: 'Stripe',
+        subscribeUrl: '/subscribe?product=hookkeep',
+        billingHost: BILLING_PUBLIC_URL || null,
+        note: 'Hookkeep Pro $9/mo via Stripe Checkout',
+        after:
+          'After checkout you receive (or the operator mints) a one-time unlock code — paste it in the dashboard under Unlock Pro.',
+        fallback:
+          'Stripe not wired on this host? Email hudson.gouge@projxon.ai with your workspace email to get an unlock code.',
       },
     },
   })
 );
+
+/** Subscribe CTA — redirect to the stripe-billing host when configured; never 404. */
+app.get('/subscribe', (c) => {
+  const product = c.req.query('product') || 'hookkeep';
+  if (BILLING_PUBLIC_URL) {
+    return c.redirect(`${BILLING_PUBLIC_URL}/subscribe?product=${encodeURIComponent(product)}`, 302);
+  }
+  return c.html(
+    `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hookkeep Pro — billing not wired</title>
+<link rel="stylesheet" href="/styles.css"></head><body>
+<main class="wrap" style="max-width:640px;margin:4rem auto;padding:0 1.25rem">
+  <h1>Stripe Checkout isn't connected on this host yet.</h1>
+  <p class="muted">Hookkeep Pro is $9/mo. This deployment has no <code>BILLING_PUBLIC_URL</code> set,
+  so checkout can't start here.</p>
+  <ul class="muted">
+    <li>Operator: set <code>BILLING_PUBLIC_URL</code> to the stripe-billing host (see <code>DEPLOY.md</code>).</li>
+    <li>Customer: email <a href="mailto:hudson.gouge@projxon.ai">hudson.gouge@projxon.ai</a> with your workspace email to get a Pro unlock code.</li>
+  </ul>
+  <p><a class="btn" href="/">← Back to Hookkeep</a> <a class="btn" href="/app.html">Open dashboard</a></p>
+</main></body></html>`,
+    503
+  );
+});
+
+/**
+ * Billing fulfill bridge (for the stripe-billing app to call after checkout).
+ * Gated by HOOKKEEP_FULFILL_SECRET. Body: { workspaceId? | email?, code? | sessionId? }
+ * - With `code`: redeems that code on the workspace.
+ * - With `sessionId` only: mints a fresh one-time code, redeems it, returns it.
+ */
+app.post('/api/stripe/fulfill', async (c) => {
+  if (!FULFILL_SECRET) return c.json({ error: 'fulfill_not_configured' }, 503);
+  const secret = c.req.header('x-fulfill-secret') || '';
+  if (secret !== FULFILL_SECRET) return c.json({ error: 'unauthorized' }, 401);
+  const body = await c.req.json().catch(() => ({}));
+  const ws = db.getWorkspaceByIdOrEmail({ workspaceId: body.workspaceId, email: body.email });
+  if (!ws) return c.json({ error: 'workspace_not_found' }, 404);
+  let code = String(body.code || '').trim();
+  if (!code && body.sessionId) {
+    code = db.mintUnlockCode({ note: `stripe:${String(body.sessionId).slice(0, 60)}` });
+  }
+  if (!code) return c.json({ error: 'need_code_or_session' }, 400);
+  try {
+    const workspace = db.redeemUnlock(ws, code);
+    return c.json({ ok: true, workspace, code });
+  } catch (e) {
+    return c.json({ error: e.code || 'unlock_failed' }, 400);
+  }
+});
 
 /** Create workspace + first inbox */
 app.post('/api/workspace', async (c) => {
@@ -227,4 +294,7 @@ app.get('/', (c) => c.redirect('/index.html'));
 
 console.log(`[hookkeep] listening on http://0.0.0.0:${PORT}`);
 console.log(`[hookkeep] data dir: ${db.DATA_DIR}`);
+console.log(
+  `[hookkeep] billing: ${BILLING_PUBLIC_URL || 'NOT SET — /subscribe shows setup page'}${PUBLIC_BASE ? ` · public URL: ${PUBLIC_BASE}` : ' · public URL: request host (HOOKKEEP_PUBLIC_URL unset)'}`
+);
 serve({ fetch: app.fetch, port: PORT, hostname: '0.0.0.0' });

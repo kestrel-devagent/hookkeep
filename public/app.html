@@ -16,7 +16,8 @@
   </div>
   <nav>
     <span id="tier-pill" class="pill">…</span>
-    <a href="/#pricing">Upgrade</a>
+    <a href="/subscribe">Upgrade</a>
+    <button class="btn btn-sm btn-ghost" id="btn-signout" hidden>Sign out</button>
   </nav>
 </header>
 
@@ -29,6 +30,9 @@
       <button class="btn btn-primary" id="btn-load">Load</button>
       <button class="btn" id="btn-new">Create new</button>
     </div>
+    <div class="row" style="margin-top:0.5rem">
+      <button class="btn btn-sm btn-ghost" id="btn-restore" hidden>Restore saved token from this browser</button>
+    </div>
     <p id="boot-msg" class="msg" hidden></p>
   </div>
 
@@ -36,13 +40,14 @@
     <div class="toolbar">
       <strong id="ws-label">Workspace</strong>
       <span id="usage" class="pill"></span>
-      <button class="btn btn-sm" id="btn-unlock">Unlock Pro</button>
+      <button class="btn btn-sm btn-primary" id="btn-unlock">Unlock Pro</button>
       <button class="btn btn-sm" id="btn-copy-token">Copy token</button>
     </div>
     <div id="upgrade-banner" class="upgrade-banner hidden">
       <span>Free tier limit nearby — unlock Pro ($9/mo Stripe) for 5 inboxes + real alerts (keyword or status ≥ 400 → Discord/Slack webhook).</span>
-      <a class="btn btn-sm btn-primary" href="/#stripe">Subscribe with Stripe</a>
+      <a class="btn btn-sm btn-primary" href="/subscribe">Subscribe with Stripe</a>
     </div>
+    <p id="host-note" class="fine hidden" style="color:var(--danger)"></p>
 
     <div class="layout">
       <aside class="side">
@@ -62,6 +67,7 @@
         <input id="alert-email" type="email" placeholder="you@company.com" style="width:100%;margin:0.35rem 0" />
         <p id="alert-hint" class="muted" style="font-size:0.75rem;margin:0.25rem 0"></p>
         <button class="btn btn-sm" id="btn-save-inbox" style="width:100%;margin-top:0.35rem;justify-content:center">Save inbox</button>
+        <p class="fine" style="font-size:0.75rem;margin-top:0.75rem">Data persists while the host keeps <code>HOOKKEEP_DATA</code> mounted — see DEPLOY.md.</p>
       </aside>
 
       <section class="main-panel">
@@ -90,25 +96,92 @@
             <input id="search" type="search" placeholder="Search events…" />
             <button class="btn btn-sm" id="btn-refresh">Refresh</button>
           </div>
-          <table>
-            <thead>
-              <tr><th>When</th><th>Method</th><th>Status</th><th>Preview</th></tr>
-            </thead>
-            <tbody id="events-body">
-              <tr><td colspan="4" class="muted">No events yet. POST to your webhook URL.</td></tr>
-            </tbody>
-          </table>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>When</th><th>Method</th><th>Status</th><th>Preview</th></tr>
+              </thead>
+              <tbody id="events-body"></tbody>
+            </table>
+          </div>
+          <div id="empty-state" class="empty-state hidden">
+            <p><strong>No events yet.</strong> Send a test webhook:</p>
+            <pre id="empty-curl" style="margin:0.5rem 0"></pre>
+            <button class="btn btn-sm" id="btn-empty-test">Send a test event now</button>
+          </div>
         </div>
       </section>
     </div>
   </div>
 </div>
 
+<!-- Save-token modal (blocking, must be acknowledged) -->
+<div id="token-modal" class="modal-backdrop hidden">
+  <div class="modal card">
+    <h2 style="margin-top:0">Save your owner token</h2>
+    <p class="muted">This token is the <em>only</em> way into your workspace — there is no password reset yet.
+    It's saved in <strong>this</strong> browser (localStorage), but copy it now so you keep access after
+    clearing site data or switching devices.</p>
+    <pre id="token-modal-value" style="word-break:break-all;white-space:pre-wrap"></pre>
+    <div class="row">
+      <button class="btn btn-sm" id="btn-token-copy">Copy token</button>
+      <button class="btn btn-sm" id="btn-token-download">Download hookkeep-token.txt</button>
+    </div>
+    <label style="display:flex;gap:0.5rem;align-items:center;margin-top:1rem;cursor:pointer">
+      <input type="checkbox" id="token-confirm" style="flex:0 0 auto" />
+      <span>I copied or downloaded my token and understand it's my only login.</span>
+    </label>
+    <button class="btn btn-primary" id="btn-token-done" disabled style="margin-top:1rem;justify-content:center;width:100%">Enter dashboard</button>
+  </div>
+</div>
+
+<!-- Unlock modal -->
+<div id="unlock-modal" class="modal-backdrop hidden">
+  <div class="modal card">
+    <h2 style="margin-top:0">Unlock Hookkeep Pro — $9/mo</h2>
+    <p class="muted">5 inboxes · 5,000 events/mo · real alerts (keyword or status ≥ 400 → Discord/Slack webhook).</p>
+    <a class="btn btn-primary" id="btn-subscribe" href="/subscribe?product=hookkeep" style="justify-content:center;width:100%">Subscribe with Stripe</a>
+    <hr style="border-color:var(--border);margin:1rem 0" />
+    <p class="muted" style="margin:0 0 0.5rem"><strong>Have an unlock code?</strong> Paste it after Stripe checkout (or from an operator):</p>
+    <div class="row">
+      <input id="unlock-code" type="text" placeholder="HOOKKEEP-PRO-…" autocomplete="off" />
+      <button class="btn" id="btn-redeem">Redeem</button>
+    </div>
+    <p id="unlock-msg" class="msg" hidden></p>
+    <p class="fine" style="font-size:0.8rem;margin-top:0.75rem">Demo unlock codes (note contains "demo") are for testing only — they never expire but are not a real subscription.</p>
+    <button class="btn btn-sm btn-ghost" id="btn-unlock-close" style="margin-top:0.75rem">Close</button>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
 <script>
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
-let token = params.get('token') || localStorage.getItem('hookkeep_token') || '';
+const savedToken = localStorage.getItem('hookkeep_token') || '';
+let token = params.get('token') || savedToken;
 let state = { workspace: null, inboxes: [], activeInboxId: null, currentEvent: null };
+
+const ERRORS = {
+  no_forward_url: 'Set a Forward URL (your n8n webhook) first — see the sidebar.',
+  unauthorized: 'Invalid or missing owner token.',
+  inbox_limit: 'Inbox limit reached — unlock Pro for 5 inboxes.',
+  invalid_code: 'That unlock code is not valid.',
+  code_used: 'That unlock code was already used on another workspace.',
+  not_found: 'Not found.',
+};
+function humanError(e) {
+  const code = e?.data?.error || e?.message || '';
+  return ERRORS[code] || e?.data?.message || code || 'Something went wrong';
+}
+function toast(msg, isErr) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.remove('hidden');
+  t.classList.toggle('err', !!isErr);
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.add('hidden'), 4500);
+}
 
 function authHeaders() {
   return { 'x-hookkeep-token': token, 'content-type': 'application/json' };
@@ -127,11 +200,14 @@ async function api(path, opts = {}) {
 function showApp() {
   $('boot-gate').classList.add('hidden');
   $('app').classList.remove('hidden');
+  $('btn-signout').hidden = false;
 }
 
 function showBoot(msg) {
   $('boot-gate').classList.remove('hidden');
   $('app').classList.add('hidden');
+  $('btn-signout').hidden = true;
+  if (savedToken) $('btn-restore').hidden = false;
   if (msg) { $('boot-msg').hidden = false; $('boot-msg').textContent = msg; }
 }
 
@@ -160,6 +236,7 @@ function render() {
     );
     banner.classList.toggle('hidden', !near);
   }
+  $('btn-unlock').style.display = ws.tier === 'paid' ? 'none' : '';
 
   const list = $('inbox-list');
   list.innerHTML = '';
@@ -177,6 +254,17 @@ function render() {
     $('alert-kw').value = active.alertKeyword || '';
     $('notify-url').value = active.notifyWebhookUrl || '';
     $('alert-email').value = active.alertEmail || '';
+    $('empty-curl').textContent =
+      `curl -X POST ${active.webhookUrl} \\\n  -H 'content-type: application/json' \\\n  -d '{"hello":"hookkeep","status":"ok"}'`;
+    // Warn when the configured public URL host doesn't match this page's host
+    try {
+      const wh = new URL(active.webhookUrl).host;
+      $('host-note').classList.toggle('hidden', wh === location.host);
+      if (wh !== location.host) {
+        $('host-note').textContent =
+          `Note: webhook URLs point at ${wh} (HOOKKEEP_PUBLIC_URL), not ${location.host}. If that host is a dead tunnel, set HOOKKEEP_PUBLIC_URL or unset it to use the request host.`;
+      }
+    } catch { /* ignore */ }
   }
   $('alert-hint').textContent = ws.tier === 'paid'
     ? 'Pro alerts fire on keyword match or HTTP status ≥ 400 → notify webhook + alerts log + mailto hint.'
@@ -188,10 +276,13 @@ async function loadEvents() {
   const q = $('search').value.trim();
   const data = await api(`/api/inboxes/${state.activeInboxId}/events?q=${encodeURIComponent(q)}`);
   const tbody = $('events-body');
+  const empty = $('empty-state');
   if (!data.events.length) {
-    tbody.innerHTML = '<tr><td colspan="4" class="muted">No events yet. POST to your webhook URL.</td></tr>';
+    tbody.innerHTML = '';
+    empty.classList.remove('hidden');
     return;
   }
+  empty.classList.add('hidden');
   tbody.innerHTML = data.events.map((e) => `
     <tr data-id="${e.id}">
       <td>${new Date(e.receivedAt).toLocaleString()}</td>
@@ -227,9 +318,24 @@ $('btn-back').onclick = () => {
   loadEvents();
 };
 
+function focusForwardUrl() {
+  $('detail-view').classList.add('hidden');
+  $('list-view').classList.remove('hidden');
+  const f = $('forward-url');
+  f.classList.add('flash');
+  f.focus();
+  setTimeout(() => f.classList.remove('flash'), 2500);
+}
+
 $('btn-replay').onclick = async () => {
   if (!state.currentEvent) return;
   const msg = $('replay-msg');
+  const active = state.inboxes.find((i) => i.id === state.activeInboxId);
+  if (!$('forward-url').value.trim() && !(active && active.forwardUrl)) {
+    toast('Set a Forward URL (your n8n webhook) first.', true);
+    focusForwardUrl();
+    return;
+  }
   msg.hidden = false;
   msg.textContent = 'Forwarding…';
   try {
@@ -240,26 +346,35 @@ $('btn-replay').onclick = async () => {
     });
     msg.textContent = res.ok
       ? `Forwarded → HTTP ${res.status} in ${res.ms}ms`
-      : `Failed: ${res.error || res.message || 'error'}`;
+      : `Failed: ${humanError({ data: res })}`;
+    if (res.error === 'no_forward_url') focusForwardUrl();
   } catch (e) {
-    msg.textContent = 'Replay failed: ' + (e.data?.error || e.message);
+    if (e.data?.error === 'no_forward_url') {
+      msg.hidden = true;
+      toast('Set a Forward URL (your n8n webhook) first.', true);
+      focusForwardUrl();
+      return;
+    }
+    msg.textContent = 'Replay failed: ' + humanError(e);
   }
 };
 
 $('btn-copy-body').onclick = async () => {
   await navigator.clipboard.writeText($('ev-body').textContent);
+  toast('Body copied.');
 };
 
 $('btn-copy-url').onclick = async () => {
   await navigator.clipboard.writeText($('webhook-url').textContent);
+  toast('Webhook URL copied.');
 };
 
 $('btn-copy-token').onclick = async () => {
   await navigator.clipboard.writeText(token);
-  alert('Owner token copied. Store it — it is your login.');
+  toast('Owner token copied — keep it safe, it is your only login.');
 };
 
-$('btn-test').onclick = async () => {
+async function sendTestEvent() {
   const url = $('webhook-url').textContent;
   await fetch(url, {
     method: 'POST',
@@ -267,22 +382,29 @@ $('btn-test').onclick = async () => {
     body: JSON.stringify({ source: 'hookkeep-test', status: 'ok', at: new Date().toISOString() }),
   });
   await loadEvents();
-};
+}
+$('btn-test').onclick = sendTestEvent;
+$('btn-empty-test').onclick = sendTestEvent;
 
 $('btn-refresh').onclick = () => loadEvents();
 $('search').oninput = debounce(() => loadEvents(), 250);
 
 $('btn-save-inbox').onclick = async () => {
-  await api(`/api/inboxes/${state.activeInboxId}`, {
-    method: 'PATCH',
-    body: JSON.stringify({
-      forwardUrl: $('forward-url').value,
-      alertKeyword: $('alert-kw').value,
-      notifyWebhookUrl: $('notify-url').value,
-      alertEmail: $('alert-email').value,
-    }),
-  });
-  await loadWorkspace();
+  try {
+    await api(`/api/inboxes/${state.activeInboxId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        forwardUrl: $('forward-url').value,
+        alertKeyword: $('alert-kw').value,
+        notifyWebhookUrl: $('notify-url').value,
+        alertEmail: $('alert-email').value,
+      }),
+    });
+    await loadWorkspace();
+    toast('Inbox saved.');
+  } catch (e) {
+    toast(humanError(e), true);
+  }
 };
 
 $('btn-add-inbox').onclick = async () => {
@@ -293,44 +415,92 @@ $('btn-add-inbox').onclick = async () => {
     state.activeInboxId = data.inbox.id;
     await loadWorkspace();
   } catch (e) {
-    if (e.status === 402) alert('Inbox limit reached. Unlock Pro ($9/mo) for 5 inboxes.');
-    else alert(e.message);
+    toast(humanError(e), true);
+    if (e.status === 402) $('unlock-modal').classList.remove('hidden');
   }
 };
 
-$('btn-unlock').onclick = async () => {
-  const code = prompt('Paste your Pro unlock code (from Stripe fulfillment / operator)');
+// ---- Unlock modal ----
+$('btn-unlock').onclick = () => $('unlock-modal').classList.remove('hidden');
+$('btn-unlock-close').onclick = () => $('unlock-modal').classList.add('hidden');
+$('btn-redeem').onclick = async () => {
+  const code = $('unlock-code').value.trim();
   if (!code) return;
+  const msg = $('unlock-msg');
   try {
     await api('/api/unlock', { method: 'POST', body: JSON.stringify({ code }) });
+    $('unlock-modal').classList.add('hidden');
     await loadWorkspace();
-    alert('Pro unlocked. Enjoy 5 inboxes + alerts.');
+    toast('Pro unlocked — enjoy 5 inboxes + alerts.');
   } catch (e) {
-    alert('Unlock failed: ' + (e.data?.error || e.message));
+    msg.hidden = false;
+    msg.textContent = 'Unlock failed: ' + humanError(e);
   }
+};
+
+// ---- Token save modal ----
+function showTokenModal(t) {
+  $('token-modal-value').textContent = t;
+  $('token-confirm').checked = false;
+  $('btn-token-done').disabled = true;
+  $('token-modal').classList.remove('hidden');
+}
+$('token-confirm').onchange = () => { $('btn-token-done').disabled = !$('token-confirm').checked; };
+$('btn-token-copy').onclick = async () => {
+  await navigator.clipboard.writeText(token);
+  toast('Token copied.');
+};
+$('btn-token-download').onclick = () => {
+  const blob = new Blob([`Hookkeep owner token: ${token}\nDashboard: ${location.origin}/app.html?token=${token}\n`], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'hookkeep-token.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+$('btn-token-done').onclick = async () => {
+  $('token-modal').classList.add('hidden');
+  history.replaceState({}, '', '/app.html');
+  await loadWorkspace();
 };
 
 $('btn-load').onclick = async () => {
   token = $('token-input').value.trim();
   if (!token) return;
   localStorage.setItem('hookkeep_token', token);
-  history.replaceState({}, '', '/app.html?token=' + encodeURIComponent(token));
+  history.replaceState({}, '', '/app.html');
   try { await loadWorkspace(); }
-  catch { showBoot('Invalid token'); }
+  catch (e) { showBoot('Invalid token — ' + humanError(e)); }
+};
+
+$('btn-restore').onclick = async () => {
+  token = savedToken;
+  $('token-input').value = token;
+  try { await loadWorkspace(); }
+  catch (e) { showBoot('Saved token no longer works — ' + humanError(e)); }
+};
+
+$('btn-signout').onclick = () => {
+  localStorage.removeItem('hookkeep_token');
+  token = '';
+  $('token-input').value = '';
+  $('btn-restore').hidden = true;
+  history.replaceState({}, '', '/app.html');
+  showBoot('Signed out. Your workspace still exists — paste your owner token to return.');
 };
 
 $('btn-new').onclick = async () => {
-  const email = prompt('Email (optional)') || '';
+  const email = prompt('Email (optional — used for Pro unlock / alerts)') || '';
   const res = await fetch('/api/workspace', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ email }),
   });
   const data = await res.json();
+  if (!res.ok) { showBoot('Create failed: ' + (data.error || res.status)); return; }
   token = data.ownerToken;
   localStorage.setItem('hookkeep_token', token);
-  history.replaceState({}, '', '/app.html?token=' + encodeURIComponent(token));
-  await loadWorkspace();
+  showTokenModal(token);
 };
 
 function debounce(fn, ms) {
@@ -338,10 +508,14 @@ function debounce(fn, ms) {
 }
 
 (async () => {
+  if (savedToken) $('btn-restore').hidden = false;
   if (token) {
     $('token-input').value = token;
-    try { await loadWorkspace(); }
-    catch { showBoot('Could not load workspace — check token'); }
+    try {
+      await loadWorkspace();
+      if (params.get('new') === '1') showTokenModal(token);
+    }
+    catch (e) { showBoot('Could not load workspace — ' + humanError(e)); }
   }
 })();
 </script>

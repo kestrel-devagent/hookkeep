@@ -32,6 +32,8 @@ const rand = (n) => {
 const REV_EPOCH = 99999999999999; // ms — larger than any realistic Date.now()
 const evKey = (inboxId, ts, id) =>
   `evt:${inboxId}:${String(REV_EPOCH - ts).padStart(14, '0')}_${id}`;
+const alKey = (inboxId, ts, id) =>
+  `alert:${inboxId}:${String(REV_EPOCH - ts).padStart(14, '0')}_${id}`;
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -328,6 +330,10 @@ export default {
           }
         }
 
+        if (alertRecord) {
+          ctx.waitUntil(kv.put(alKey(inboxId, ts, alertRecord.id), JSON.stringify(alertRecord), { expirationTtl: 60 * 60 * 24 * 30 }));
+        }
+
         if (alertRecord && alertRecord.notifyWebhookUrl) {
           ctx.waitUntil(
             sendNotifyWebhook(alertRecord.notifyWebhookUrl, alertRecord).then((r) => {
@@ -370,14 +376,35 @@ export default {
             eventsMonth: 5000,
             alerts: true,
             pay: {
-              method: 'PayPal',
-              email: 'hudson.gouge@projxon.ai',
-              note: 'Hookkeep Pro $9',
+              method: 'Stripe',
+              subscribeUrl: '/subscribe?product=hookkeep',
+              billingHost: (env.BILLING_PUBLIC_URL || env.STRIPE_BILLING_URL || '').replace(/\/$/, '') || null,
+              note: 'Hookkeep Pro $9/mo via Stripe Checkout',
               after:
-                'Email the same address with your PayPal transaction ID + workspace email to receive an unlock code.',
+                'After checkout you receive (or the operator mints) a one-time unlock code — paste it in the dashboard under Unlock Pro.',
+              fallback:
+                'Stripe not wired on this host? Email hudson.gouge@projxon.ai with your workspace email to get an unlock code.',
             },
           },
         });
+      }
+
+      // ---- Subscribe CTA — redirect to billing host or helpful page; never 404 ----
+      if (path === '/subscribe' && request.method === 'GET') {
+        const product = url.searchParams.get('product') || 'hookkeep';
+        const billing = (env.BILLING_PUBLIC_URL || env.STRIPE_BILLING_URL || '').replace(/\/$/, '');
+        if (billing) {
+          return Response.redirect(`${billing}/subscribe?product=${encodeURIComponent(product)}`, 302);
+        }
+        return new Response(
+          `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Hookkeep Pro — billing not wired</title></head>
+<body style="font-family:system-ui;background:#0b1220;color:#e8eefc;max-width:640px;margin:4rem auto;padding:0 1.25rem">
+<h1>Stripe Checkout isn't connected on this host yet.</h1>
+<p style="color:#9aa8c7">Hookkeep Pro is $9/mo. Set <code>BILLING_PUBLIC_URL</code> on the worker to enable checkout.
+Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.ai">hudson.gouge@projxon.ai</a> for an unlock code.</p>
+<p><a style="color:#3dd6c6" href="/">← Back to Hookkeep</a></p></body></html>`,
+          { status: 503, headers: { 'content-type': 'text/html' } }
+        );
       }
 
       if (path === '/api/workspace' && request.method === 'POST') {
@@ -510,6 +537,23 @@ export default {
           events.push(summarizeEvent(ev));
         }
         return json({ events });
+      }
+
+      const alertsMatch = path.match(/^\/api\/inboxes\/([^/]+)\/alerts$/);
+      if (alertsMatch && request.method === 'GET') {
+        const ws = await requireWs();
+        if (!ws) return json({ error: 'unauthorized' }, 401);
+        const inboxId = alertsMatch[1];
+        const inbox = await getInbox(kv, inboxId);
+        if (!inbox || inbox.workspaceId !== ws.id) return json({ error: 'not_found' }, 404);
+        const cap = Math.min(Number(url.searchParams.get('limit') || 20), 200);
+        const listed = await kv.list({ prefix: `alert:${inboxId}:`, limit: cap });
+        const alerts = [];
+        for (const k of listed.keys) {
+          const a = await kv.get(k.name, 'json');
+          if (a) alerts.push(a);
+        }
+        return json({ alerts });
       }
 
       const eventMatch = path.match(/^\/api\/events\/([^/]+)(\/replay)?$/);
