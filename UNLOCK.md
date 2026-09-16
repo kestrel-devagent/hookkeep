@@ -1,14 +1,12 @@
 # Hookkeep Pro — manual unlock flow (MVP)
 
-## Customer path
+## Customer path (target)
 
 1. Customer creates a free workspace in Hookkeep (saves owner token).
-2. Pays **$9 USD** via PayPal to `hudson.gouge@projxon.ai` (note: `Hookkeep Pro $9`).
-3. Emails `hudson.gouge@projxon.ai` with:
-   - PayPal transaction ID
-   - Workspace email (if set) **or** last 8 chars of owner token
-4. Operator replies with a one-time code (see below).
-5. Customer opens dashboard → **Unlock Pro** → pastes code.
+2. Subscribes via **Stripe Checkout — $9/mo** (landing `#stripe` / `/subscribe`).
+3. Stripe webhook sets `tier=paid` (when billing stub is live).
+4. Fallback (pre-Stripe): operator issues a one-time unlock code (below).
+5. Customer opens dashboard → **Unlock Pro** → pastes code if needed.
 
 ## Operator path
 
@@ -27,7 +25,7 @@ import fs from 'fs';
 const p='data/hookkeep.json';
 const db=JSON.parse(fs.readFileSync(p,'utf8'));
 const code='HOOKKEEP-PRO-'+Math.random().toString(36).slice(2,8).toUpperCase();
-db.unlockCodes[code]={tier:'paid',usedBy:null,note:'paypal-manual',createdAt:new Date().toISOString()};
+db.unlockCodes[code]={tier:'paid',usedBy:null,note:'stripe-or-manual',createdAt:new Date().toISOString()};
 fs.writeFileSync(p,JSON.stringify(db,null,2));
 console.log(code);
 "
@@ -52,7 +50,7 @@ Free workspaces get **no** alerts even if the fields are set.
 
 ## What's left for real subscriptions
 
-1. Stripe Checkout (or PayPal Subscriptions) webhook → auto-set `tier=paid`
+1. Stripe Checkout webhook → auto-set `tier=paid` (see `/workspace/ship/stripe-billing-2026-09-16/`)
 2. Recurring billing + grace period on cancel
 3. Optional SMTP email delivery (Resend/Mailgun free tier) — webhook + mailto covers MVP
 4. Durable multi-region store (Cloudflare D1 / Turso)

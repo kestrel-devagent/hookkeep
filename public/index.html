@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Hookkeep — Hosted webhook inbox for n8n | Kestrel Ops</title>
-<meta name="description" content="Durable HTTPS webhook URLs. Capture, search, and replay payloads to n8n. Free tier + Pro $9/mo. PayPal unlock — no card required." />
+<meta name="description" content="Durable HTTPS webhook URLs. Capture, search, and replay payloads to n8n. Free tier + Pro $9/mo via Stripe Checkout." />
 <meta property="og:title" content="Hookkeep — webhook inbox for n8n" />
 <meta property="og:description" content="Get an HTTPS webhook URL, store events, search, and replay to n8n. Free + Pro $9/mo." />
 <link rel="stylesheet" href="/styles.css" />
@@ -42,10 +42,10 @@
     <ul class="hero-proof">
       <li>✓ No signup form — token is your login</li>
       <li>✓ Works with Stripe, GitHub, Slack, any webhook</li>
-      <li>✓ Pro unlock via PayPal $9 (manual code — no Stripe tax yet)</li>
+      <li>✓ Pro $9/mo via Stripe Checkout</li>
     </ul>
     <p id="start-msg" class="msg" hidden></p>
-    <p class="fine hero-note">Marketing site (always on): <a href="https://kestrel-devagent.github.io/hookkeep/">kestrel-devagent.github.io/hookkeep</a> · Pay/contact <code>hudson.gouge@projxon.ai</code></p>
+    <p class="fine hero-note">Marketing site (always on): <a href="https://kestrel-devagent.github.io/hookkeep/">kestrel-devagent.github.io/hookkeep</a> · Billing: Kestrel Ops · Stripe Checkout</p>
   </section>
 
   <section id="how" class="grid3">
@@ -91,15 +91,13 @@
     </div>
   </section>
 
-  <section id="pay" class="pay">
-    <h2>How to unlock Pro (MVP)</h2>
-    <ol>
-      <li>Create a free inbox (button above) and save your owner token.</li>
-      <li>Send <strong>$9 USD</strong> via PayPal to <code>hudson.gouge@projxon.ai</code> with note <code>Hookkeep Pro $9</code>.</li>
-      <li>Email the same address with PayPal transaction ID + workspace email (or last 8 chars of token).</li>
-      <li>Paste the one-time code in the dashboard → <strong>Unlock Pro</strong>.</li>
-    </ol>
-    <p class="fine">Manual unlock is intentional for MVP (no Stripe yet). Codes are one-time. Demo codes exist for operators only.</p>
+  <section id="stripe" class="pay">
+    <h2>Hookkeep Pro — Stripe Checkout</h2>
+    <p>Pro is <strong>$9/mo</strong> via Stripe Checkout (no PayPal).</p>
+    <div class="cta" style="margin:1rem 0">
+      <a class="btn btn-primary" href="/subscribe" id="stripe-checkout-cta">Subscribe with Stripe — $9/mo</a>
+    </div>
+    <p class="fine" style="opacity:.75">Stripe Checkout — wiring now. When live, this opens a Checkout Session. Existing one-time unlock codes still work for operators.</p>
   </section>
 
   <section class="faq pay">
@@ -114,7 +112,7 @@
     </details>
     <details>
       <summary>Lost my token?</summary>
-      <p class="fine">MVP has no magic-link recovery yet — copy the token when you create the workspace. Contact <a href="mailto:hudson.gouge@projxon.ai">hudson.gouge@projxon.ai</a> if you paid Pro and need help.</p>
+      <p class="fine">MVP has no magic-link recovery yet — copy the token when you create the workspace. Contact Kestrel Ops via the <a href="https://github.com/kestrel-devagent/hookkeep">Hookkeep GitHub repo</a> if you paid Pro and need help.</p>
     </details>
   </section>
 
@@ -126,7 +124,7 @@
       <button class="btn btn-primary" type="submit">Join waitlist</button>
     </form>
     <p id="wait-msg" class="msg" hidden></p>
-    <p class="fine">Questions: <a href="mailto:hudson.gouge@projxon.ai">hudson.gouge@projxon.ai</a></p>
+    <p class="fine">Questions: <a href="https://github.com/kestrel-devagent/hookkeep">Kestrel Ops / Hookkeep on GitHub</a></p>
   </section>
 </main>
 

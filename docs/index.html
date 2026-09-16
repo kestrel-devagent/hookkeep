@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Hookkeep — Hosted webhook inbox | Kestrel Ops</title>
-<meta name="description" content="HTTPS webhook inbox for n8n. Capture, search, replay. Free + Pro $9/mo via PayPal." />
+<meta name="description" content="HTTPS webhook inbox for n8n. Capture, search, replay. Free + Pro $9/mo via Stripe Checkout." />
 <style>
 :root{--bg:#0b1220;--panel:#121a2b;--text:#e8eefc;--muted:#9aa8c7;--accent:#5b8cff;--accent2:#3dd6c6;--border:#243049}
 *{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:radial-gradient(1000px 500px at 10% -10%,#1a2a4a 0%,var(--bg) 55%);color:var(--text);min-height:100vh}
@@ -36,13 +36,16 @@ ul{color:var(--muted)}
       <li><strong>Free</strong> — 1 inbox, last 50 events, replay</li>
       <li><strong>Pro $9/mo</strong> — 5 inboxes, 5k events/mo, real alerts (keyword or HTTP status ≥ 400 → Discord/Slack webhook + mailto hint)</li>
     </ul>
-    <p class="fine">PayPal <code>hudson.gouge@projxon.ai</code> note <code>Hookkeep Pro $9</code> → email txn ID → unlock code in dashboard.</p>
+    <div class="cta" id="stripe" style="margin-top:1rem">
+      <a class="btn btn-primary" href="/subscribe" id="stripe-checkout-cta">Subscribe with Stripe — $9/mo</a>
+    </div>
+    <p class="fine" style="opacity:.75">Stripe Checkout — wiring now. Checkout opens via Stripe (no PayPal).</p>
   </div>
   <div class="card">
     <h2 style="margin-top:0">Self-host</h2>
     <p class="fine">Node MVP + Workers stub in the repo. See <a href="https://github.com/kestrel-devagent/hookkeep/blob/main/DEPLOY.md">DEPLOY.md</a>. Demo tunnel hostnames rotate; this Pages site stays put.</p>
   </div>
-  <p class="fine">Contact: <a href="mailto:hudson.gouge@projxon.ai">hudson.gouge@projxon.ai</a> · Related: <a href="https://kestrel-devagent.github.io/n8n-webhook-catcher/">Free Catcher</a></p>
+  <p class="fine">Contact: <a href="https://github.com/kestrel-devagent/hookkeep">Kestrel Ops on GitHub</a> · Related: <a href="https://kestrel-devagent.github.io/n8n-webhook-catcher/">Free Catcher</a></p>
 </main>
 <script>
 // Optional: override demo URL without rebuilding marketing copy
