@@ -78,6 +78,7 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
 - `POST /api/events/:id/replay` `{ "targetUrl?: string" }`
 - `POST /api/unlock` `{ "code" }`
 - `POST /api/waitlist` `{ "email", "note?" }`
+- Operator: `npm run digest-waitlist` → mailto draft of waitlist + Stripe unlock path (no SMTP)
 - `GET /subscribe` → redirect to billing host (or helpful setup page)
 - `GET /api/health` → `dataDir`, `persistOk`, `workspaceCount`, `billing`
 - `POST /api/stripe/fulfill` → billing bridge, gated by `HOOKKEEP_FULFILL_SECRET`

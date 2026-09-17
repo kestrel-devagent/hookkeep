@@ -14,7 +14,7 @@ Hosted webhook inbox for n8n / automation builders — by **Kestrel Ops**.
 
 - Create a free inbox → get an HTTPS `/hook/…` URL
 - Inspect + search events, replay to n8n
-- Pro ($9/mo) unlock via PayPal to `hudson.gouge@projxon.ai` (manual code)
+- Pro ($9/mo) via Stripe Checkout (`/subscribe?product=hookkeep` when `BILLING_PUBLIC_URL` set); contact `hudson.gouge@projxon.ai` for unlock help
 
 **Space env:** set `HOOKKEEP_PUBLIC_URL` to this Space’s public URL. Data dir defaults to `/data` (attach a volume when possible).
 

@@ -1,6 +1,6 @@
 {
-  "demoUrl": "https://duo-frost-gonna-surgery.trycloudflare.com",
+  "demoUrl": "https://households-name-asking-consensus.trycloudflare.com",
   "billingUrl": null,
-  "updatedAt": "2026-09-16T13:38:00-04:00",
-  "note": "Ephemeral trycloudflare; update this file when the tunnel hostname changes. Set billingUrl to the stripe-billing host to point the Stripe CTA there directly."
+  "updatedAt": "2026-09-17T09:30:00-04:00",
+  "note": "Ephemeral trycloudflare; update this file when the tunnel hostname changes. Set billingUrl to the stripe-billing host to point the Stripe CTA there directly. Durable fallback: https://kestrel-devagent.github.io/hookkeep/"
 }

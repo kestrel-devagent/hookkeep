@@ -45,6 +45,14 @@
       <li>✓ Pro $9/mo via Stripe Checkout</li>
     </ul>
     <p id="start-msg" class="msg" hidden></p>
+    <div class="card" id="demo-unlock" style="margin-top:1.25rem;padding:1rem 1.1rem">
+      <strong>Try Pro on this demo (no charge)</strong>
+      <p class="fine" style="margin:.4rem 0 .75rem">Create an inbox → Open inbox → Unlock Pro → paste <code id="demo-code">HOOKKEEP-PRO-DEMO01</code>
+        <button type="button" class="btn btn-sm" id="btn-copy-demo" style="margin-left:.35rem">Copy code</button>
+      </p>
+      <p class="fine" style="margin:0">Paid Pro is <strong>$9/mo via Stripe Checkout</strong> at <a href="/subscribe?product=hookkeep">/subscribe?product=hookkeep</a>
+        (redirects when <code>BILLING_PUBLIC_URL</code> is set; otherwise shows a setup page + contact <a href="mailto:hudson.gouge@projxon.ai">hudson.gouge@projxon.ai</a>).</p>
+    </div>
     <p class="fine hero-note">Marketing site (always on): <a href="https://kestrel-devagent.github.io/hookkeep/">kestrel-devagent.github.io/hookkeep</a> · Billing: Kestrel Ops · Stripe Checkout</p>
   </section>
 
@@ -97,7 +105,7 @@
     <div class="cta" style="margin:1rem 0">
       <a class="btn btn-primary" href="/subscribe?product=hookkeep" id="stripe-checkout-cta">Subscribe with Stripe — $9/mo</a>
     </div>
-    <p class="fine" style="opacity:.75">Stripe Checkout — connect key to go live (no PayPal). When live: {PUBLIC_BASE_URL}/subscribe?product=hookkeep. Existing one-time unlock codes still work for operators.</p>
+    <p class="fine" style="opacity:.75">Stripe Checkout preferred path. When <code>BILLING_PUBLIC_URL</code> is set, /subscribe redirects there. Demo code HOOKKEEP-PRO-DEMO01 unlocks Pro on this host for testing (no charge).</p>
   </section>
 
   <section class="faq pay">
@@ -156,6 +164,14 @@ async function createWorkspace() {
   }
 }
 document.getElementById('btn-start').onclick = createWorkspace;
+document.getElementById('btn-copy-demo')?.addEventListener('click', async () => {
+  const code = document.getElementById('demo-code')?.textContent?.trim() || 'HOOKKEEP-PRO-DEMO01';
+  try {
+    await navigator.clipboard.writeText(code);
+    const b = document.getElementById('btn-copy-demo');
+    if (b) { const prev = b.textContent; b.textContent = 'Copied'; setTimeout(() => b.textContent = prev, 1200); }
+  } catch { prompt('Copy this demo unlock code:', code); }
+});
 document.getElementById('btn-start-2').onclick = createWorkspace;
 document.getElementById('wait-form').onsubmit = async (ev) => {
   ev.preventDefault();
