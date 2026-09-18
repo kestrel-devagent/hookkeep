@@ -27,8 +27,9 @@ Get a durable HTTPS webhook URL, store payloads, search recent events, open deta
 
 4. **Open the dashboard** (`/app.html`) — see the event, headers, raw body.
 
-5. **Replay** — paste your n8n webhook into *Forward URL* in the sidebar, hit
-   *Save inbox*, open the event, click **Replay / forward**.
+5. **Replay / export** — paste your n8n webhook into *Forward URL* in the sidebar, hit
+   *Save inbox*, open the event, click **Replay / forward**. Or **Copy as curl** /
+   **Download JSON** to share the capture offline.
 
 6. (Optional) **Smoke test** the whole path:
 
@@ -45,9 +46,9 @@ Data lives in `data/hookkeep.json` (atomic writes). On a host, set
 
 ## Live demo (ephemeral tunnel)
 
-**URL:** https://duo-frost-gonna-surgery.trycloudflare.com
+**URL:** https://households-name-asking-consensus.trycloudflare.com
 
-Quick Cloudflare tunnel in front of the Node MVP on the build box. Hostname may change if the tunnel restarts — update `docs/demo.json` when it does. Prefer **HF Space Docker / any Node host / Workers** (see [DEPLOY.md](./DEPLOY.md)).
+Quick Cloudflare tunnel in front of the Node MVP on the build box. Hostname may change if the tunnel restarts — update `docs/demo.json` when it does (Pages reads that file). Prefer **HF Space Docker / any Node host / Workers** (see [DEPLOY.md](./DEPLOY.md)).
 
 ## Pricing
 
@@ -79,6 +80,7 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
 - `POST /api/unlock` `{ "code" }`
 - `POST /api/waitlist` `{ "email", "note?" }`
 - Operator: `npm run digest-waitlist` → mailto draft of waitlist + Stripe unlock path (no SMTP)
+- Operator: `npm run status` → health + waitlist count + demo URL from `docs/demo.json`
 - `GET /subscribe` → redirect to billing host (or helpful setup page)
 - `GET /api/health` → `dataDir`, `persistOk`, `workspaceCount`, `billing`
 - `POST /api/stripe/fulfill` → billing bridge, gated by `HOOKKEEP_FULFILL_SECRET`

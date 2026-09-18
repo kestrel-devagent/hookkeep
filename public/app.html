@@ -76,8 +76,14 @@
           <h3 id="ev-title" style="margin:0.75rem 0">Event</h3>
           <div class="toolbar">
             <button class="btn btn-primary btn-sm" id="btn-replay">Replay / forward</button>
+            <button class="btn btn-sm" id="btn-copy-curl" title="Copy a curl that replays this capture">Copy as curl</button>
+            <button class="btn btn-sm" id="btn-dl-json" title="Download the full capture as JSON">Download JSON</button>
             <button class="btn btn-sm" id="btn-copy-body">Copy body</button>
           </div>
+          <details id="curl-panel" class="curl-panel" style="margin:0.75rem 0">
+            <summary class="muted" style="cursor:pointer;font-size:0.85rem">curl replay snippet</summary>
+            <pre id="ev-curl" style="margin-top:0.5rem;white-space:pre-wrap;word-break:break-all"></pre>
+          </details>
           <p id="replay-msg" class="msg" hidden></p>
           <h4 class="muted">Headers</h4>
           <pre id="ev-headers"></pre>
@@ -299,6 +305,55 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+function shellSingleQuote(s) {
+  return "'" + String(s).replace(/'/g, "'\\''") + "'";
+}
+
+function buildCurlSnippet(ev) {
+  const active = state.inboxes.find((i) => i.id === state.activeInboxId);
+  const url = (active && active.webhookUrl) || (location.origin + '/hook/' + (ev.inboxId || ''));
+  const method = (ev.method || 'POST').toUpperCase();
+  const headers = ev.headers || {};
+  const skip = new Set([
+    'host', 'content-length', 'connection', 'transfer-encoding',
+    'accept-encoding', 'cf-connecting-ip', 'cf-ray', 'cf-visitor',
+    'cdn-loop', 'x-forwarded-for', 'x-forwarded-proto', 'x-real-ip',
+  ]);
+  const lines = [`curl -X ${method} ${shellSingleQuote(url)}`];
+  for (const [k, v] of Object.entries(headers)) {
+    if (skip.has(String(k).toLowerCase())) continue;
+    if (v == null || v === '') continue;
+    lines.push(`  -H ${shellSingleQuote(k + ': ' + v)}`);
+  }
+  const body = ev.bodyText != null ? String(ev.bodyText) : (ev.bodyJson != null ? JSON.stringify(ev.bodyJson) : '');
+  if (body.length) {
+    lines.push(`  --data-binary ${shellSingleQuote(body)}`);
+  }
+  return lines.join(' \\\n');
+}
+
+function exportEventJson(ev) {
+  const active = state.inboxes.find((i) => i.id === state.activeInboxId);
+  return {
+    exportedAt: new Date().toISOString(),
+    tool: 'hookkeep',
+    brand: 'Kestrel Ops',
+    webhookUrl: active ? active.webhookUrl : null,
+    event: {
+      id: ev.id,
+      inboxId: ev.inboxId,
+      method: ev.method,
+      receivedAt: ev.receivedAt,
+      headers: ev.headers || {},
+      bodyText: ev.bodyText != null ? ev.bodyText : null,
+      bodyJson: ev.bodyJson != null ? ev.bodyJson : null,
+      statusGuess: ev.statusGuess || null,
+      preview: ev.preview || null,
+    },
+    curl: buildCurlSnippet(ev),
+  };
+}
+
 async function openEvent(id) {
   const data = await api(`/api/events/${id}`);
   state.currentEvent = data.event;
@@ -309,6 +364,8 @@ async function openEvent(id) {
   let body = data.event.bodyText || '';
   if (data.event.bodyJson) body = JSON.stringify(data.event.bodyJson, null, 2);
   $('ev-body').textContent = body;
+  $('ev-curl').textContent = buildCurlSnippet(data.event);
+  $('curl-panel').open = false;
   $('replay-msg').hidden = true;
 }
 
@@ -362,6 +419,26 @@ $('btn-replay').onclick = async () => {
 $('btn-copy-body').onclick = async () => {
   await navigator.clipboard.writeText($('ev-body').textContent);
   toast('Body copied.');
+};
+
+$('btn-copy-curl').onclick = async () => {
+  if (!state.currentEvent) return;
+  const snippet = $('ev-curl').textContent || buildCurlSnippet(state.currentEvent);
+  await navigator.clipboard.writeText(snippet);
+  $('curl-panel').open = true;
+  toast('curl replay snippet copied.');
+};
+
+$('btn-dl-json').onclick = () => {
+  if (!state.currentEvent) return;
+  const payload = exportEventJson(state.currentEvent);
+  const blob = new Blob([JSON.stringify(payload, null, 2) + '\n'], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `hookkeep-event-${state.currentEvent.id}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  toast('Event JSON downloaded.');
 };
 
 $('btn-copy-url').onclick = async () => {

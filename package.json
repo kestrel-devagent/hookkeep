@@ -7,7 +7,8 @@
     "test": "node scripts/smoke-test.js",
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "digest-waitlist": "node scripts/digest-waitlist.js"
+    "digest-waitlist": "node scripts/digest-waitlist.js",
+    "status": "node scripts/status.js"
   },
   "keywords": [],
   "author": "",
