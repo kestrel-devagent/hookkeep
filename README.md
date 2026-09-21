@@ -46,9 +46,9 @@ Data lives in `data/hookkeep.json` (atomic writes). On a host, set
 
 ## Live demo (ephemeral tunnel)
 
-**URL:** https://households-name-asking-consensus.trycloudflare.com
+**Durable marketing:** https://kestrel-devagent.github.io/hookkeep/
 
-Quick Cloudflare tunnel in front of the Node MVP on the build box. Hostname may change if the tunnel restarts — update `docs/demo.json` when it does (Pages reads that file). Prefer **HF Space Docker / any Node host / Workers** (see [DEPLOY.md](./DEPLOY.md)).
+trycloudflare quick tunnel was **rate-limited (HTTP 429 / error 1015) on 2026-09-21** — no public ephemeral inbox URL until cool-down. Update `docs/demo.json` when a tunnel is back (Pages reads that file). Prefer **HF Space Docker / any Node host / Workers** (see [DEPLOY.md](./DEPLOY.md)).
 
 ## Pricing
 
@@ -81,6 +81,7 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
 - `POST /api/waitlist` `{ "email", "note?" }`
 - Operator: `npm run digest-waitlist` → mailto draft of waitlist + Stripe unlock path (no SMTP)
 - Operator: `npm run status` → health + waitlist count + demo URL from `docs/demo.json`
+- Dashboard: filter events by text (`q`), HTTP `method`, and numeric `statusMin` (`GET /api/inboxes/:id/events`)
 - `GET /subscribe` → redirect to billing host (or helpful setup page)
 - `GET /api/health` → `dataDir`, `persistOk`, `workspaceCount`, `billing`
 - `POST /api/stripe/fulfill` → billing bridge, gated by `HOOKKEEP_FULFILL_SECRET`

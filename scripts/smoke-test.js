@@ -88,6 +88,41 @@ async function main() {
   console.log('events', events.events.length, events.events[0]?.statusGuess);
   check(events.events.length >= 1, 'no events listed');
 
+  step('ingest GET + numeric status for filters');
+  const ingestGet = await fetch(hook + '?probe=1', {
+    method: 'GET',
+    headers: { 'x-test': 'filter' },
+  }).then((r) => r.json());
+  check(ingestGet.ok && ingestGet.id, 'GET ingest failed');
+  const ingest400 = await fetch(hook, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ event: 'http.out', status: 502, msg: 'upstream' }),
+  }).then((r) => r.json());
+  check(ingest400.ok && ingest400.id, 'status 502 ingest failed');
+
+  step('filter events q=payment');
+  const byQ = await fetch(
+    `${BASE}/api/inboxes/${created.inbox.id}/events?q=${encodeURIComponent('payment')}`,
+    { headers: { 'x-hookkeep-token': created.ownerToken } }
+  ).then((r) => r.json());
+  check(byQ.events.some((e) => e.id === ingest.id), 'q=payment missed payment event');
+  check(!byQ.events.some((e) => e.id === ingest400.id), 'q=payment should exclude 502 event');
+
+  step('filter events method=GET');
+  const byMethod = await fetch(`${BASE}/api/inboxes/${created.inbox.id}/events?method=GET`, {
+    headers: { 'x-hookkeep-token': created.ownerToken },
+  }).then((r) => r.json());
+  check(byMethod.events.every((e) => e.method === 'GET'), 'method=GET leaked non-GET');
+  check(byMethod.events.some((e) => e.id === ingestGet.id), 'method=GET missed GET event');
+
+  step('filter events statusMin=500');
+  const byStatus = await fetch(`${BASE}/api/inboxes/${created.inbox.id}/events?statusMin=500`, {
+    headers: { 'x-hookkeep-token': created.ownerToken },
+  }).then((r) => r.json());
+  check(byStatus.events.every((e) => Number(e.statusGuess) >= 500), 'statusMin=500 leaked lower');
+  check(byStatus.events.some((e) => e.id === ingest400.id), 'statusMin=500 missed 502 event');
+
   step('replay without forwardUrl → no_forward_url');
   const noFwd = await fetch(`${BASE}/api/events/${ingest.id}/replay`, {
     method: 'POST',

@@ -181,7 +181,16 @@ app.get('/api/inboxes/:id/events', (c) => {
   const ws = requireWs(c);
   if (!ws) return c.json({ error: 'unauthorized' }, 401);
   const q = c.req.query('q') || '';
-  const events = db.listEvents(ws, c.req.param('id'), { q, limit: Number(c.req.query('limit') || 50) });
+  const method = c.req.query('method') || '';
+  const statusMinRaw = c.req.query('statusMin');
+  const statusMin =
+    statusMinRaw === undefined || statusMinRaw === '' ? null : Number(statusMinRaw);
+  const events = db.listEvents(ws, c.req.param('id'), {
+    q,
+    method,
+    statusMin,
+    limit: Number(c.req.query('limit') || 50),
+  });
   if (!events) return c.json({ error: 'not_found' }, 404);
   return c.json({ events });
 });

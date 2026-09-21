@@ -401,7 +401,7 @@ export function listAlerts(ws, inboxId, { limit = 20 } = {}) {
   return rows.slice(-Math.min(limit, 200)).reverse();
 }
 
-export function listEvents(ws, inboxId, { q = '', limit = 50 } = {}) {
+export function listEvents(ws, inboxId, { q = '', method = '', statusMin = null, limit = 50 } = {}) {
   const db = read();
   const inbox = db.inboxes[inboxId];
   if (!inbox || inbox.workspaceId !== ws.id) return null;
@@ -415,8 +415,20 @@ export function listEvents(ws, inboxId, { q = '', limit = 50 } = {}) {
       (e) =>
         (e.bodyText || '').toLowerCase().includes(qq) ||
         (e.statusGuess || '').toLowerCase().includes(qq) ||
+        (e.method || '').toLowerCase().includes(qq) ||
         e.id.includes(qq)
     );
+  }
+  if (method) {
+    const mm = String(method).toUpperCase();
+    rows = rows.filter((e) => String(e.method || '').toUpperCase() === mm);
+  }
+  if (statusMin != null && statusMin !== '' && !Number.isNaN(Number(statusMin))) {
+    const min = Number(statusMin);
+    rows = rows.filter((e) => {
+      const n = Number(String(e.statusGuess ?? '').trim());
+      return !Number.isNaN(n) && n >= min;
+    });
   }
   const cap = Math.min(limit, limits.maxEventsKeep);
   return rows.slice(0, cap).map(summarizeEvent);

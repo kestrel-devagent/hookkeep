@@ -98,8 +98,20 @@
             <button class="btn btn-sm" id="btn-copy-url">Copy</button>
             <button class="btn btn-sm" id="btn-test">Send test</button>
           </div>
-          <div class="row" style="margin-bottom:0.75rem">
-            <input id="search" type="search" placeholder="Search events…" />
+          <div class="row filter-bar" style="margin-bottom:0.75rem;flex-wrap:wrap;gap:0.5rem;align-items:center">
+            <input id="search" type="search" placeholder="Search events…" style="min-width:10rem;flex:1" />
+            <select id="filter-method" aria-label="HTTP method" style="max-width:7.5rem">
+              <option value="">Any method</option>
+              <option value="GET">GET</option>
+              <option value="POST">POST</option>
+              <option value="PUT">PUT</option>
+              <option value="PATCH">PATCH</option>
+              <option value="DELETE">DELETE</option>
+              <option value="HEAD">HEAD</option>
+              <option value="OPTIONS">OPTIONS</option>
+            </select>
+            <input id="filter-status-min" type="number" min="0" step="1" placeholder="Status ≥"
+              aria-label="Minimum numeric statusGuess" style="width:6.5rem" />
             <button class="btn btn-sm" id="btn-refresh">Refresh</button>
           </div>
           <div class="table-wrap">
@@ -280,7 +292,13 @@ function render() {
 async function loadEvents() {
   if (!state.activeInboxId) return;
   const q = $('search').value.trim();
-  const data = await api(`/api/inboxes/${state.activeInboxId}/events?q=${encodeURIComponent(q)}`);
+  const method = ($('filter-method') && $('filter-method').value) || '';
+  const statusMin = ($('filter-status-min') && $('filter-status-min').value.trim()) || '';
+  const qs = new URLSearchParams();
+  if (q) qs.set('q', q);
+  if (method) qs.set('method', method);
+  if (statusMin !== '') qs.set('statusMin', statusMin);
+  const data = await api(`/api/inboxes/${state.activeInboxId}/events?${qs.toString()}`);
   const tbody = $('events-body');
   const empty = $('empty-state');
   if (!data.events.length) {
@@ -465,6 +483,8 @@ $('btn-empty-test').onclick = sendTestEvent;
 
 $('btn-refresh').onclick = () => loadEvents();
 $('search').oninput = debounce(() => loadEvents(), 250);
+if ($('filter-method')) $('filter-method').onchange = () => loadEvents();
+if ($('filter-status-min')) $('filter-status-min').oninput = debounce(() => loadEvents(), 250);
 
 $('btn-save-inbox').onclick = async () => {
   try {
