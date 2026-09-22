@@ -73,7 +73,7 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
 - `POST /hook/:inboxId` → **public ingest** (any method)
 - `GET /api/workspace` + header `x-hookkeep-token`
 - `PATCH /api/inboxes/:id` `{ name?, forwardUrl?, alertKeyword?, alertEmail?, notifyWebhookUrl? }`
-- `GET /api/inboxes/:id/events?q=`
+- `GET /api/inboxes/:id/events?q=&method=&statusMin=` (text / HTTP method / status ≥ N)
 - `GET /api/inboxes/:id/alerts?limit=20` → recent Pro alert records
 - `GET /api/events/:id`
 - `POST /api/events/:id/replay` `{ "targetUrl?: string" }`
@@ -82,6 +82,7 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
 - Operator: `npm run digest-waitlist` → mailto draft of waitlist + Stripe unlock path (no SMTP)
 - Operator: `npm run status` → health + waitlist count + demo URL from `docs/demo.json`
 - Dashboard: filter events by text (`q`), HTTP `method`, and numeric `statusMin` (`GET /api/inboxes/:id/events`)
+- Workers KV path mirrors the same `q` / `method` / `statusMin` filters as Node
 - `GET /subscribe` → redirect to billing host (or helpful setup page)
 - `GET /api/health` → `dataDir`, `persistOk`, `workspaceCount`, `billing`
 - `POST /api/stripe/fulfill` → billing bridge, gated by `HOOKKEEP_FULFILL_SECRET`

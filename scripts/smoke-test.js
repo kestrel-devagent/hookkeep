@@ -123,6 +123,18 @@ async function main() {
   check(byStatus.events.every((e) => Number(e.statusGuess) >= 500), 'statusMin=500 leaked lower');
   check(byStatus.events.some((e) => e.id === ingest400.id), 'statusMin=500 missed 502 event');
 
+  step('filter events method=POST&statusMin=500 combined');
+  const byCombo = await fetch(
+    `${BASE}/api/inboxes/${created.inbox.id}/events?method=POST&statusMin=500`,
+    { headers: { 'x-hookkeep-token': created.ownerToken } }
+  ).then((r) => r.json());
+  check(
+    byCombo.events.every((e) => e.method === 'POST' && Number(e.statusGuess) >= 500),
+    'combined filter leaked'
+  );
+  check(byCombo.events.some((e) => e.id === ingest400.id), 'combined filter missed 502 POST');
+  check(!byCombo.events.some((e) => e.id === ingestGet.id), 'combined filter should exclude GET');
+
   step('replay without forwardUrl → no_forward_url');
   const noFwd = await fetch(`${BASE}/api/events/${ingest.id}/replay`, {
     method: 'POST',

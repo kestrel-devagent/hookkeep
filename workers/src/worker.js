@@ -519,7 +519,12 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
         if (!inbox || inbox.workspaceId !== ws.id) return json({ error: 'not_found' }, 404);
         const limits = TIERS[ws.tier] || TIERS.free;
         const cap = Math.min(Number(url.searchParams.get('limit') || 50), limits.maxEventsKeep);
+        // Mirror Node listEvents filters: q / method / statusMin
         const q = (url.searchParams.get('q') || '').toLowerCase();
+        const methodFilter = (url.searchParams.get('method') || '').toUpperCase();
+        const statusMinRaw = url.searchParams.get('statusMin');
+        const statusMin =
+          statusMinRaw === null || statusMinRaw === '' ? null : Number(statusMinRaw);
         // Keys sort newest-first; scan until we have `cap` matches (bounded by keep window)
         const listed = await kv.list({ prefix: `evt:${inboxId}:`, limit: limits.maxEventsKeep });
         const events = [];
@@ -527,13 +532,19 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           if (events.length >= cap) break;
           const ev = await kv.get(k.name, 'json');
           if (!ev) continue;
-          if (
-            q &&
-            !(ev.bodyText || '').toLowerCase().includes(q) &&
-            !(ev.statusGuess || '').toLowerCase().includes(q) &&
-            !ev.id.includes(q)
-          )
-            continue;
+          if (q) {
+            const hay =
+              (ev.bodyText || '').toLowerCase().includes(q) ||
+              (ev.statusGuess || '').toLowerCase().includes(q) ||
+              (ev.method || '').toLowerCase().includes(q) ||
+              String(ev.id || '').includes(q);
+            if (!hay) continue;
+          }
+          if (methodFilter && String(ev.method || '').toUpperCase() !== methodFilter) continue;
+          if (statusMin != null && !Number.isNaN(statusMin)) {
+            const n = Number(String(ev.statusGuess ?? '').trim());
+            if (Number.isNaN(n) || n < statusMin) continue;
+          }
           events.push(summarizeEvent(ev));
         }
         return json({ events });

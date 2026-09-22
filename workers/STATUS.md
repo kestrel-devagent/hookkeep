@@ -1,7 +1,7 @@
 # Workers port — STATUS
 
 **Author:** Devin SWE-2 medium (+ orchestrator finish)
-**Updated:** 2026-09-16
+**Updated:** 2026-09-22
 
 ## What works (code complete; deploy needs CF account)
 
@@ -30,7 +30,12 @@ Canonical live demo remains the Node + trycloudflare tunnel.
 | Alerts | `data/alerts.ndjson` + console log | KV `alert:` keys (30d TTL) + console log |
 | Billing fulfill bridge | `POST /api/stripe/fulfill` | not ported (operator mints codes via `wrangler kv key put`) |
 | Static UI | `@hono/node-server` static | Workers Assets |
+| Event filters (`q`/`method`/`statusMin`) | Node `listEvents` | Workers KV list path (parity 2026-09-22) |
 | Local smoke | `npm test` | needs `wrangler dev` |
+
+## Done recently
+
+- 2026-09-22: mirrored inbound event filters (`q` / `method` / `statusMin`) into Workers `GET /api/inboxes/:id/events` to match Node `listEvents`.
 
 ## Next
 
