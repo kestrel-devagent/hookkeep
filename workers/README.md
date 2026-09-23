@@ -14,6 +14,7 @@ Brand: **Kestrel Ops / Hookkeep**.
 - `GET /api/events/:id` — event detail
 - `POST /api/events/:id/replay` — forward stored request to `targetUrl` or inbox `forwardUrl`
 - `POST /api/unlock` — redeem Pro unlock code (5 inboxes, 5k events/mo, keyword alerts)
+- `POST /api/stripe/fulfill` — billing fulfill bridge (Node parity); header `x-fulfill-secret` vs `FULFILL_SECRET` / `HOOKKEEP_FULFILL_SECRET`; body `{ workspaceId? | email?, code? | sessionId? }` mints/redeems unlock and returns `{ ok, workspace, code }`
 - `GET /api/inboxes/:id/alerts?limit=` — recent Pro alert records (KV, 30-day TTL)
 - `POST /api/waitlist` — Pro waitlist
 - `GET /api/pricing`, `GET /api/health`
@@ -77,4 +78,5 @@ npx wrangler dev        # serves on http://localhost:8787 with local KV
 | `inbox:<id>` | inbox object |
 | `evt:<inboxId>:<revTs>_<id>` | event (keys sort newest-first) |
 | `wait:<email>` | waitlist entry |
+| `email:<email>` | workspace id (fulfill lookup by email) |
 | `code:<CODE>` | unlock code entry |

@@ -83,6 +83,7 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
 - Operator: `npm run status` → health + waitlist count + demo URL from `docs/demo.json`
 - Dashboard: filter events by text (`q`), HTTP `method`, and numeric `statusMin` (`GET /api/inboxes/:id/events`)
 - Workers KV path mirrors the same `q` / `method` / `statusMin` filters as Node
+- Workers `POST /api/stripe/fulfill` mirrors Node (gate: `FULFILL_SECRET` / `HOOKKEEP_FULFILL_SECRET` + `x-fulfill-secret`)
 - `GET /subscribe` → redirect to billing host (or helpful setup page)
 - `GET /api/health` → `dataDir`, `persistOk`, `workspaceCount`, `billing`
 - `POST /api/stripe/fulfill` → billing bridge, gated by `HOOKKEEP_FULFILL_SECRET`

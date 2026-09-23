@@ -18,3 +18,5 @@ preview_id = "REPLACE_WITH_PREVIEW_KV_NAMESPACE_ID"
 # [vars]
 # HOOKKEEP_PUBLIC_URL = "https://hookkeep.<your-subdomain>.workers.dev"  # public base for webhookUrl responses
 # BILLING_PUBLIC_URL = "https://<stripe-billing-host>"                 # makes /subscribe redirect to Stripe billing
+# Prefer secrets for billing gate: wrangler secret put FULFILL_SECRET
+# (alias HOOKKEEP_FULFILL_SECRET also accepted by the worker)

@@ -1,7 +1,7 @@
 # Workers port — STATUS
 
 **Author:** Devin SWE-2 medium (+ orchestrator finish)
-**Updated:** 2026-09-22
+**Updated:** 2026-09-23
 
 ## What works (code complete; deploy needs CF account)
 
@@ -28,13 +28,14 @@ Canonical live demo remains the Node + trycloudflare tunnel.
 |------|------|---------|
 | Storage | JSON file (atomic tmp+rename) | KV (needs namespace id) |
 | Alerts | `data/alerts.ndjson` + console log | KV `alert:` keys (30d TTL) + console log |
-| Billing fulfill bridge | `POST /api/stripe/fulfill` | not ported (operator mints codes via `wrangler kv key put`) |
+| Billing fulfill bridge | `POST /api/stripe/fulfill` | ported 2026-09-23 (`FULFILL_SECRET` / `HOOKKEEP_FULFILL_SECRET` + `x-fulfill-secret`) |
 | Static UI | `@hono/node-server` static | Workers Assets |
 | Event filters (`q`/`method`/`statusMin`) | Node `listEvents` | Workers KV list path (parity 2026-09-22) |
 | Local smoke | `npm test` | needs `wrangler dev` |
 
 ## Done recently
 
+- 2026-09-23: ported Node `POST /api/stripe/fulfill` into Workers (auth gate, mint-from-sessionId, redeem, email index `email:<em>`). Unit: `scripts/workers-fulfill-unit.js`.
 - 2026-09-22: mirrored inbound event filters (`q` / `method` / `statusMin`) into Workers `GET /api/inboxes/:id/events` to match Node `listEvents`.
 
 ## Next

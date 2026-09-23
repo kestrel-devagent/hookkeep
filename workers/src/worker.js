@@ -9,6 +9,7 @@
  *   inbox:<inboxId>           -> inbox object
  *   evt:<inboxId>:<revTs>_<rand> -> event object (keys sort newest-first)
  *   wait:<email>              -> waitlist entry
+ *   email:<email>             -> workspace id (for billing fulfill lookup)
  *   code:<CODE>               -> unlock code entry { tier, usedBy, note }
  */
 
@@ -237,6 +238,81 @@ async function getInbox(kv, inboxId) {
   return kv.get(`inbox:${inboxId}`, 'json');
 }
 
+/** Resolve workspace by id or email (email via email:<em> index). */
+async function getWorkspaceByIdOrEmail(kv, { workspaceId, email } = {}) {
+  if (workspaceId) {
+    const ws = await kv.get(`ws:${workspaceId}`, 'json');
+    if (ws) return ws;
+  }
+  const em = String(email || '').trim().toLowerCase();
+  if (em) {
+    const id = await kv.get(`email:${em}`);
+    if (id) return kv.get(`ws:${id}`, 'json');
+  }
+  return null;
+}
+
+/**
+ * Pure fulfill auth gate (mirrored in scripts/workers-fulfill-unit.js).
+ * envSecret = FULFILL_SECRET || HOOKKEEP_FULFILL_SECRET
+ */
+function fulfillAuthCheck(envSecret, headerSecret) {
+  if (!envSecret) return { ok: false, status: 503, error: 'fulfill_not_configured' };
+  if (String(headerSecret || '') !== String(envSecret))
+    return { ok: false, status: 401, error: 'unauthorized' };
+  return { ok: true, status: 200 };
+}
+
+/**
+ * Resolve code from body: prefer explicit code, else mint from sessionId.
+ * mintFn(sessionId) -> code string (caller persists).
+ */
+function resolveFulfillCode(body, mintFn) {
+  let code = String(body.code || '').trim();
+  if (!code && body.sessionId) {
+    code = mintFn(body.sessionId);
+  }
+  if (!code) return { error: 'need_code_or_session' };
+  return { code };
+}
+
+function mintUnlockCodeString(sessionId) {
+  return 'HOOKKEEP-PRO-' + rand(8).toUpperCase();
+}
+
+/** Redeem unlock code onto workspace; mutates ws + returns entry for KV put. */
+async function redeemUnlockOnWorkspace(kv, ws, code) {
+  const key = String(code || '').trim().toUpperCase();
+  const entry =
+    (await kv.get(`code:${key}`, 'json')) ||
+    (BUILTIN_CODES[key] ? { ...BUILTIN_CODES[key] } : null);
+  if (!entry) {
+    const err = new Error('invalid_code');
+    err.code = 'invalid_code';
+    throw err;
+  }
+  const reusable =
+    entry.reusable === true || String(entry.note || '').toLowerCase().includes('demo');
+  if (entry.usedBy && entry.usedBy !== ws.id && !reusable) {
+    const err = new Error('code_used');
+    err.code = 'code_used';
+    throw err;
+  }
+  ws.tier = entry.tier || 'paid';
+  ws.unlockedAt = new Date().toISOString();
+  ws.unlockCode = key;
+  if (!reusable) {
+    entry.usedBy = ws.id;
+    entry.usedAt = ws.unlockedAt;
+  } else {
+    entry.lastUsedBy = ws.id;
+    entry.lastUsedAt = ws.unlockedAt;
+    entry.usedBy = null;
+  }
+  await Promise.all([saveWorkspace(kv, ws), kv.put(`code:${key}`, JSON.stringify(entry))]);
+  return { key, entry, workspace: publicWorkspace(ws) };
+}
+
 function baseUrl(request, env) {
   const pub = (env.HOOKKEEP_PUBLIC_URL || '').replace(/\/$/, '');
   if (pub) return pub;
@@ -434,12 +510,14 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           createdAt: new Date().toISOString(),
           eventCount: 0,
         };
-        await Promise.all([
+        const puts = [
           kv.put(`tok:${ownerToken}`, id),
           saveWorkspace(kv, ws),
           kv.put(`ws:${id}:inboxes`, JSON.stringify([inbox.id])),
           kv.put(`inbox:${inbox.id}`, JSON.stringify(inbox)),
-        ]);
+        ];
+        if (ws.email) puts.push(kv.put(`email:${ws.email}`, id));
+        await Promise.all(puts);
         const base = baseUrl(request, env);
         return json({
           workspace: publicWorkspace(ws),
@@ -643,30 +721,55 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
         }
       }
 
+      // Billing fulfill bridge (Node parity) — gated by FULFILL_SECRET / HOOKKEEP_FULFILL_SECRET
+      if (path === '/api/stripe/fulfill' && request.method === 'POST') {
+        const envSecret = env.FULFILL_SECRET || env.HOOKKEEP_FULFILL_SECRET || '';
+        const auth = fulfillAuthCheck(envSecret, request.headers.get('x-fulfill-secret') || '');
+        if (!auth.ok) return json({ error: auth.error }, auth.status);
+        const body = await bodyJson();
+        const ws = await getWorkspaceByIdOrEmail(kv, {
+          workspaceId: body.workspaceId,
+          email: body.email,
+        });
+        if (!ws) return json({ error: 'workspace_not_found' }, 404);
+        let minted = null;
+        const resolved = resolveFulfillCode(body, (sessionId) => {
+          minted = {
+            code: mintUnlockCodeString(sessionId),
+            note: `stripe:${String(sessionId).slice(0, 60)}`,
+          };
+          return minted.code;
+        });
+        if (resolved.error) return json({ error: resolved.error }, 400);
+        if (minted) {
+          await kv.put(
+            `code:${minted.code}`,
+            JSON.stringify({
+              tier: 'paid',
+              usedBy: null,
+              note: minted.note,
+              createdAt: new Date().toISOString(),
+            })
+          );
+        }
+        try {
+          const result = await redeemUnlockOnWorkspace(kv, ws, resolved.code);
+          return json({ ok: true, workspace: result.workspace, code: result.key });
+        } catch (e) {
+          return json({ error: e.code || 'unlock_failed' }, 400);
+        }
+      }
+
       if (path === '/api/unlock' && request.method === 'POST') {
         const ws = await requireWs();
         if (!ws) return json({ error: 'unauthorized' }, 401);
         const body = await bodyJson();
-        const key = String(body.code || '').trim().toUpperCase();
-        const entry = (await kv.get(`code:${key}`, 'json')) ||
-          (BUILTIN_CODES[key] ? { ...BUILTIN_CODES[key] } : null);
-        if (!entry) return json({ error: 'invalid_code', message: 'invalid_code' }, 400);
-        const reusable = entry.reusable === true || String(entry.note || '').toLowerCase().includes('demo');
-        if (entry.usedBy && entry.usedBy !== ws.id && !reusable)
-          return json({ error: 'code_used', message: 'code_used' }, 400);
-        ws.tier = entry.tier || 'paid';
-        ws.unlockedAt = new Date().toISOString();
-        ws.unlockCode = key;
-        if (!reusable) {
-          entry.usedBy = ws.id;
-          entry.usedAt = ws.unlockedAt;
-        } else {
-          entry.lastUsedBy = ws.id;
-          entry.lastUsedAt = ws.unlockedAt;
-          entry.usedBy = null;
+        try {
+          const result = await redeemUnlockOnWorkspace(kv, ws, body.code);
+          return json({ ok: true, workspace: result.workspace });
+        } catch (e) {
+          return json({ error: e.code || 'unlock_failed', message: e.code || 'unlock_failed' }, 400);
         }
-        await Promise.all([saveWorkspace(kv, ws), kv.put(`code:${key}`, JSON.stringify(entry))]);
-        return json({ ok: true, workspace: publicWorkspace(ws) });
       }
 
       if (path === '/api/waitlist' && request.method === 'POST') {

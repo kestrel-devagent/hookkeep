@@ -4,7 +4,7 @@
   "description": "Hookkeep \u2014 hosted webhook inbox by Kestrel Ops",
   "main": "src/server.js",
   "scripts": {
-    "test": "node scripts/workers-filter-unit.js && node scripts/smoke-test.js",
+    "test": "node scripts/workers-filter-unit.js && node scripts/workers-fulfill-unit.js && node scripts/smoke-test.js",
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "digest-waitlist": "node scripts/digest-waitlist.js",
