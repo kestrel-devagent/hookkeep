@@ -27,8 +27,9 @@ Get a durable HTTPS webhook URL, store payloads, search recent events, open deta
 
 4. **Open the dashboard** (`/app.html`) — see the event, headers, raw body.
 
-5. **Replay / export** — paste your n8n webhook into *Forward URL* in the sidebar, hit
-   *Save inbox*, open the event, click **Replay / forward**. Or **Copy as curl** /
+5. **Replay / export** — paste your n8n webhook into *Forward URL* in the sidebar, optionally
+   enable **Auto-forward on receive**, hit *Save inbox*, open the event, click **Replay / forward**.
+   Or **Copy as curl** /
    **Download JSON** to share the capture offline.
 
 6. (Optional) **Smoke test** the whole path:
@@ -72,11 +73,15 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
 - `POST /api/workspace` → create workspace + first inbox + owner token
 - `POST /hook/:inboxId` → **public ingest** (any method)
 - `GET /api/workspace` + header `x-hookkeep-token`
-- `PATCH /api/inboxes/:id` `{ name?, forwardUrl?, alertKeyword?, alertEmail?, notifyWebhookUrl? }`
+- `PATCH /api/inboxes/:id` `{ name?, forwardUrl?, autoForward?, alertKeyword?, alertEmail?, notifyWebhookUrl? }`
 - `GET /api/inboxes/:id/events?q=&method=&statusMin=` (text / HTTP method / status ≥ N)
 - `GET /api/inboxes/:id/alerts?limit=20` → recent Pro alert records
 - `GET /api/events/:id`
 - `POST /api/events/:id/replay` `{ "targetUrl?: string" }`
+- **Auto-forward on ingest** — when an inbox has `forwardUrl` + `autoForward: true`, each
+  captured request is POSTed to `forwardUrl` (same headers/body as replay, ~8s timeout).
+  Result is stored on the event as `autoForward: { ok, status, ms, error?, target }` and
+  returned on the ingest response. Available on free tier (core job — not soft-paywalled).
 - `POST /api/unlock` `{ "code" }`
 - `POST /api/waitlist` `{ "email", "note?" }`
 - Operator: `npm run digest-waitlist` → mailto draft of waitlist + Stripe unlock path (no SMTP)

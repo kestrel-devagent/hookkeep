@@ -73,6 +73,7 @@ function publicInbox(inbox) {
     id: inbox.id,
     name: inbox.name,
     forwardUrl: inbox.forwardUrl || '',
+    autoForward: Boolean(inbox.autoForward),
     alertKeyword: inbox.alertKeyword || '',
     alertEmail: inbox.alertEmail || '',
     notifyWebhookUrl: inbox.notifyWebhookUrl || '',
@@ -320,6 +321,56 @@ function baseUrl(request, env) {
   return `${u.protocol}//${u.host}`;
 }
 
+
+/** Forward a captured event (manual replay or auto-forward). Never throws. */
+async function forwardCapturedEvent(ev, url, { timeoutMs = 15_000, auto = false } = {}) {
+  const target = String(url || '').trim();
+  if (!target) return { ok: false, error: 'no_forward_url' };
+  let dest;
+  try {
+    dest = new URL(target);
+  } catch {
+    return { ok: false, error: 'bad_url', target };
+  }
+  if (!['http:', 'https:'].includes(dest.protocol)) return { ok: false, error: 'bad_protocol', target };
+  const headers = { 'content-type': ev.contentType || 'application/json' };
+  for (const [k, v] of Object.entries(ev.headers || {})) {
+    const lk = k.toLowerCase();
+    if (
+      ['user-agent', 'x-request-id', 'x-correlation-id', 'stripe-signature', 'x-hub-signature-256'].includes(lk)
+    )
+      headers[k] = v;
+  }
+  headers['x-hookkeep-replay'] = '1';
+  headers['x-hookkeep-event-id'] = ev.id;
+  if (auto) headers['x-hookkeep-auto-forward'] = '1';
+  const started = Date.now();
+  try {
+    const res = await fetch(target, {
+      method: ev.method === 'GET' ? 'POST' : ev.method || 'POST',
+      headers,
+      body: ev.bodyText || '',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const textBody = await res.text().catch(() => '');
+    return {
+      ok: res.ok,
+      status: res.status,
+      ms: Date.now() - started,
+      bodyPreview: textBody.slice(0, 2000),
+      target,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      error: 'forward_failed',
+      message: String(e.message || e),
+      ms: Date.now() - started,
+      target,
+    };
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const kv = env.HOOKKEEP_KV;
@@ -418,8 +469,28 @@ export default {
           );
         }
 
+        const autoForwardTarget =
+          inbox.autoForward && String(inbox.forwardUrl || '').trim()
+            ? String(inbox.forwardUrl).trim()
+            : null;
+
         ctx.waitUntil(
           (async () => {
+            // Auto-forward before final put so event record includes result
+            if (autoForwardTarget) {
+              const fwd = await forwardCapturedEvent(event, autoForwardTarget, {
+                timeoutMs: 8000,
+                auto: true,
+              });
+              event.autoForward = {
+                ok: Boolean(fwd.ok),
+                status: fwd.status,
+                ms: fwd.ms,
+                target: fwd.target,
+              };
+              if (fwd.error) event.autoForward.error = String(fwd.error).slice(0, 80);
+              if (fwd.message && !fwd.ok) event.autoForward.message = String(fwd.message).slice(0, 200);
+            }
             await kv.put(evKey(inboxId, ts, eventId), JSON.stringify(event));
             await kv.put(`inbox:${inboxId}`, JSON.stringify(inbox));
             await saveWorkspace(kv, ws);
@@ -430,10 +501,17 @@ export default {
           })()
         );
 
-        return json(
-          { ok: true, id: eventId, received: true, alert, overMonth: ws.eventsThisMonth > limits.maxEventsMonth },
-          200
-        );
+        const resp = {
+          ok: true,
+          id: eventId,
+          received: true,
+          alert,
+          overMonth: ws.eventsThisMonth > limits.maxEventsMonth,
+        };
+        if (autoForwardTarget) {
+          resp.autoForward = { attempted: true, queued: true, target: autoForwardTarget };
+        }
+        return json(resp, 200);
       }
 
       // ---- API ----
@@ -504,6 +582,7 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           workspaceId: id,
           name: 'Default inbox',
           forwardUrl: '',
+          autoForward: false,
           alertKeyword: '',
           alertEmail: ws.email || '',
           notifyWebhookUrl: '',
@@ -556,6 +635,7 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           workspaceId: ws.id,
           name: String(body.name || `Inbox ${ids.length + 1}`).slice(0, 80),
           forwardUrl: '',
+          autoForward: false,
           alertKeyword: '',
           alertEmail: ws.email || '',
           notifyWebhookUrl: '',
@@ -580,6 +660,7 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
         if (!inbox || inbox.workspaceId !== ws.id) return json({ error: 'not_found' }, 404);
         if (body.name != null) inbox.name = String(body.name).slice(0, 80);
         if (body.forwardUrl != null) inbox.forwardUrl = String(body.forwardUrl).slice(0, 500);
+        if (body.autoForward != null) inbox.autoForward = Boolean(body.autoForward);
         if (body.alertKeyword != null) inbox.alertKeyword = String(body.alertKeyword).slice(0, 120);
         if (body.alertEmail != null) inbox.alertEmail = String(body.alertEmail).slice(0, 200);
         if (body.notifyWebhookUrl != null)

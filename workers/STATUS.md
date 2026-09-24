@@ -1,7 +1,7 @@
 # Workers port — STATUS
 
 **Author:** Devin SWE-2 medium (+ orchestrator finish)
-**Updated:** 2026-09-23
+**Updated:** 2026-09-24
 
 ## What works (code complete; deploy needs CF account)
 
@@ -35,6 +35,7 @@ Canonical live demo remains the Node + trycloudflare tunnel.
 
 ## Done recently
 
+- 2026-09-24: auto-forward on ingest parity — inbox `autoForward` boolean + `forwardUrl`; after store, POST capture to forwardUrl (~8s) and persist `event.autoForward` (Node sync + Workers `waitUntil`). Free tier allowed.
 - 2026-09-23: ported Node `POST /api/stripe/fulfill` into Workers (auth gate, mint-from-sessionId, redeem, email index `email:<em>`). Unit: `scripts/workers-fulfill-unit.js`.
 - 2026-09-22: mirrored inbound event filters (`q` / `method` / `statusMin`) into Workers `GET /api/inboxes/:id/events` to match Node `listEvents`.
 

@@ -292,6 +292,20 @@ async function ingest(c) {
       if (wh.error) resp.alert.webhookError = wh.error;
     }
   }
+  // Auto-forward on ingest when inbox.autoForward + forwardUrl (free-tier OK — core job)
+  if (result.autoForwardTarget) {
+    const af = await db.runAutoForward(result.eventId, result.autoForwardTarget);
+    if (af) {
+      resp.autoForward = {
+        attempted: true,
+        ok: af.ok,
+        status: af.status,
+        ms: af.ms,
+        target: af.target,
+      };
+      if (af.error) resp.autoForward.error = af.error;
+    }
+  }
   return c.json(resp, 200);
 }
 

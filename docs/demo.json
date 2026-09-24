@@ -1,6 +1,6 @@
 {
   "demoUrl": "https://kestrel-devagent.github.io/hookkeep/",
   "billingUrl": null,
-  "updatedAt": "2026-09-23T09:24:00-04:00",
-  "note": "trycloudflare still rate-limited (HTTP 429 / error 1015) since 2026-09-21 — no live ephemeral inbox. Durable marketing/docs: https://kestrel-devagent.github.io/hookkeep/. Workers now mirror Node POST /api/stripe/fulfill (FULFILL_SECRET + x-fulfill-secret). Self-host via DEPLOY.md / Docker. Local :8787 remains the operator demo."
+  "updatedAt": "2026-09-24T09:15:00-04:00",
+  "note": "trycloudflare still rate-limited (HTTP 429 / error 1015) since 2026-09-21 \u2014 no live ephemeral inbox. Durable marketing/docs: https://kestrel-devagent.github.io/hookkeep/. Auto-forward on ingest (inbox.autoForward + forwardUrl) shipped 2026-09-24 \u2014 free tier OK. Workers mirror Node. Self-host via DEPLOY.md / Docker. Local :8787 remains the operator demo."
 }

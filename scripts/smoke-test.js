@@ -1,5 +1,5 @@
 /** Local smoke test against a running server (default http://127.0.0.1:8787)
- * Steps: create → ingest → list → forwardUrl → replay → demo unlock → pro alerts → free tier
+ * Steps: create → ingest → list → forwardUrl → replay → auto-forward → demo unlock → pro alerts → free tier
  */
 import http from 'node:http';
 import fs from 'node:fs';
@@ -162,6 +162,36 @@ async function main() {
   check(replay.ok === true && replay.status === 200, `replay failed: ${JSON.stringify(replay)}`);
   check(caught.length === caughtBefore + 1, 'catcher did not receive replay');
   check(caught[caught.length - 1].body.includes('payment.failed'), 'catcher body mismatch');
+
+  step('auto-forward on ingest (free tier OK)');
+  const afPatch = await fetch(`${BASE}/api/inboxes/${created.inbox.id}`, {
+    method: 'PATCH',
+    headers: auth,
+    body: JSON.stringify({ forwardUrl: replayUrl, autoForward: true }),
+  }).then((r) => r.json());
+  check(afPatch.inbox?.autoForward === true, 'autoForward not saved');
+  check(afPatch.inbox?.forwardUrl === replayUrl, 'autoForward forwardUrl cleared');
+  const afCaughtBefore = caught.length;
+  const afIngest = await fetch(hook, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-test': 'auto-forward' },
+    body: JSON.stringify({ event: 'auto.forward.probe', ping: true }),
+  }).then((r) => r.json());
+  console.log('auto-forward ingest', afIngest);
+  check(afIngest.ok && afIngest.id, 'auto-forward ingest failed');
+  check(afIngest.autoForward?.attempted === true, 'autoForward attempted missing on ingest response');
+  check(afIngest.autoForward?.ok === true, `autoForward not ok: ${JSON.stringify(afIngest.autoForward)}`);
+  check(caught.length === afCaughtBefore + 1, 'catcher did not receive auto-forward');
+  check(
+    caught[caught.length - 1].body.includes('auto.forward.probe'),
+    'auto-forward catcher body mismatch'
+  );
+  const afEvent = await fetch(`${BASE}/api/events/${afIngest.id}`, {
+    headers: { 'x-hookkeep-token': created.ownerToken },
+  }).then((r) => r.json());
+  check(afEvent.event?.autoForward?.ok === true, 'event.autoForward not persisted');
+  check(afEvent.event?.autoForward?.target === replayUrl, 'event.autoForward.target mismatch');
+  console.log('auto-forward event field', afEvent.event.autoForward);
 
   step('demo unlock → paid');
   const unlock = await fetch(`${BASE}/api/unlock`, {

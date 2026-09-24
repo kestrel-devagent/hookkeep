@@ -84,6 +84,7 @@ function makeInbox(db, ws, { name = 'Inbox' } = {}) {
     workspaceId: ws.id,
     name: String(name).slice(0, 80),
     forwardUrl: '',
+    autoForward: false,
     alertKeyword: '',
     alertEmail: ws.email || '',
     notifyWebhookUrl: '',
@@ -169,6 +170,7 @@ export function updateInbox(ws, inboxId, patch) {
   if (!inbox || inbox.workspaceId !== ws.id) return null;
   if (patch.name != null) inbox.name = String(patch.name).slice(0, 80);
   if (patch.forwardUrl != null) inbox.forwardUrl = String(patch.forwardUrl).slice(0, 500);
+  if (patch.autoForward != null) inbox.autoForward = Boolean(patch.autoForward);
   if (patch.alertKeyword != null) inbox.alertKeyword = String(patch.alertKeyword).slice(0, 120);
   if (patch.alertEmail != null) inbox.alertEmail = String(patch.alertEmail).slice(0, 200);
   if (patch.notifyWebhookUrl != null)
@@ -249,7 +251,17 @@ export function ingestEvent(inboxId, { method, headers, bodyText, contentType })
   }
 
   write(db);
-  return { ok: true, eventId, alert, overMonth: ws.eventsThisMonth > limits.maxEventsMonth };
+  const autoForwardTarget =
+    inbox.autoForward && String(inbox.forwardUrl || '').trim()
+      ? String(inbox.forwardUrl).trim()
+      : null;
+  return {
+    ok: true,
+    eventId,
+    alert,
+    overMonth: ws.eventsThisMonth > limits.maxEventsMonth,
+    autoForwardTarget,
+  };
 }
 
 /** Extract a numeric HTTP-ish status (100-599) from an ingested event, or null. */
@@ -443,39 +455,46 @@ export function getEvent(ws, eventId) {
   return ev;
 }
 
-export async function replayEvent(ws, eventId, { targetUrl } = {}) {
-  const ev = getEvent(ws, eventId);
-  if (!ev) return { ok: false, error: 'not_found' };
-  const db = read();
-  const inbox = db.inboxes[ev.inboxId];
-  const url = (targetUrl || inbox.forwardUrl || '').trim();
-  if (!url) return { ok: false, error: 'no_forward_url' };
+/**
+ * POST a captured event body to a target URL (manual replay or auto-forward).
+ * timeoutMs defaults to 15s (manual replay); auto-forward uses ~8s like alerts.
+ * Never throws — returns { ok, status?, ms, error?, message?, bodyPreview?, target }.
+ */
+export async function forwardCapturedEvent(ev, url, { timeoutMs = 15_000, auto = false } = {}) {
+  const target = String(url || '').trim();
+  if (!target) return { ok: false, error: 'no_forward_url' };
   let dest;
   try {
-    dest = new URL(url);
+    dest = new URL(target);
   } catch {
-    return { ok: false, error: 'bad_url' };
+    return { ok: false, error: 'bad_url', target };
   }
-  if (!['http:', 'https:'].includes(dest.protocol)) return { ok: false, error: 'bad_protocol' };
+  if (!['http:', 'https:'].includes(dest.protocol)) {
+    return { ok: false, error: 'bad_protocol', target };
+  }
 
   const headers = { 'content-type': ev.contentType || 'application/json' };
-  // Forward a safe subset of original headers
   for (const [k, v] of Object.entries(ev.headers || {})) {
     const lk = k.toLowerCase();
-    if (['user-agent', 'x-request-id', 'x-correlation-id', 'stripe-signature', 'x-hub-signature-256'].includes(lk)) {
+    if (
+      ['user-agent', 'x-request-id', 'x-correlation-id', 'stripe-signature', 'x-hub-signature-256'].includes(
+        lk
+      )
+    ) {
       headers[k] = v;
     }
   }
   headers['x-hookkeep-replay'] = '1';
   headers['x-hookkeep-event-id'] = ev.id;
+  if (auto) headers['x-hookkeep-auto-forward'] = '1';
 
   const started = Date.now();
   try {
-    const res = await fetch(url, {
+    const res = await fetch(target, {
       method: ev.method === 'GET' ? 'POST' : ev.method || 'POST',
       headers,
       body: ev.bodyText || '',
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const text = await res.text().catch(() => '');
     return {
@@ -483,11 +502,65 @@ export async function replayEvent(ws, eventId, { targetUrl } = {}) {
       status: res.status,
       ms: Date.now() - started,
       bodyPreview: text.slice(0, 2000),
-      target: url,
+      target,
     };
   } catch (e) {
-    return { ok: false, error: 'forward_failed', message: String(e.message || e), target: url };
+    return {
+      ok: false,
+      error: 'forward_failed',
+      message: String(e.message || e),
+      ms: Date.now() - started,
+      target,
+    };
   }
+}
+
+/** Persist auto-forward attempt result on the stored event (dashboard detail). */
+export function setEventAutoForward(eventId, result) {
+  const db = read();
+  const ev = db.events[eventId];
+  if (!ev) return null;
+  const record = {
+    ok: Boolean(result && result.ok),
+    status: result && result.status != null ? result.status : undefined,
+    ms: result && result.ms != null ? result.ms : undefined,
+    target: result && result.target ? String(result.target).slice(0, 500) : undefined,
+  };
+  if (result && result.error) record.error = String(result.error).slice(0, 80);
+  if (result && result.message && !result.ok) {
+    record.message = String(result.message).slice(0, 200);
+  }
+  // Drop undefined keys for a clean JSON store
+  for (const k of Object.keys(record)) {
+    if (record[k] === undefined) delete record[k];
+  }
+  ev.autoForward = record;
+  write(db);
+  return record;
+}
+
+/**
+ * Best-effort auto-forward after ingest (~8s timeout like alerts).
+ * Returns the persisted autoForward record, or null if skipped.
+ */
+export async function runAutoForward(eventId, targetUrl) {
+  const db = read();
+  const ev = db.events[eventId];
+  if (!ev) return null;
+  const url = String(targetUrl || '').trim();
+  if (!url) return null;
+  const result = await forwardCapturedEvent(ev, url, { timeoutMs: 8000, auto: true });
+  return setEventAutoForward(eventId, result);
+}
+
+export async function replayEvent(ws, eventId, { targetUrl } = {}) {
+  const ev = getEvent(ws, eventId);
+  if (!ev) return { ok: false, error: 'not_found' };
+  const db = read();
+  const inbox = db.inboxes[ev.inboxId];
+  const url = (targetUrl || (inbox && inbox.forwardUrl) || '').trim();
+  if (!url) return { ok: false, error: 'no_forward_url' };
+  return forwardCapturedEvent(ev, url, { timeoutMs: 15_000, auto: false });
 }
 
 export function addWaitlist({ email, note = '' }) {
@@ -575,6 +648,7 @@ function publicInbox(inbox) {
     id: inbox.id,
     name: inbox.name,
     forwardUrl: inbox.forwardUrl || '',
+    autoForward: Boolean(inbox.autoForward),
     alertKeyword: inbox.alertKeyword || '',
     alertEmail: inbox.alertEmail || '',
     notifyWebhookUrl: inbox.notifyWebhookUrl || '',

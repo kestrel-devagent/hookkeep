@@ -59,6 +59,10 @@
         <hr style="border-color:var(--border);margin:1rem 0" />
         <label class="muted" style="font-size:0.8rem">Forward URL (n8n)</label>
         <input id="forward-url" type="url" placeholder="https://n8n.example/webhook/…" style="width:100%;margin:0.35rem 0" />
+        <label class="muted" style="font-size:0.8rem;display:flex;align-items:center;gap:0.4rem;margin:0.35rem 0">
+          <input id="auto-forward" type="checkbox" />
+          Auto-forward on receive
+        </label>
         <label class="muted" style="font-size:0.8rem">Alert keyword (Pro)</label>
         <input id="alert-kw" type="text" placeholder="error / failed / 500" style="width:100%;margin:0.35rem 0" />
         <label class="muted" style="font-size:0.8rem">Notify webhook URL (Pro)</label>
@@ -85,6 +89,7 @@
             <pre id="ev-curl" style="margin-top:0.5rem;white-space:pre-wrap;word-break:break-all"></pre>
           </details>
           <p id="replay-msg" class="msg" hidden></p>
+          <p id="auto-forward-status" class="muted" style="font-size:0.85rem;margin:0.5rem 0" hidden></p>
           <h4 class="muted">Headers</h4>
           <pre id="ev-headers"></pre>
           <h4 class="muted">Body</h4>
@@ -269,6 +274,7 @@ function render() {
   if (active) {
     $('webhook-url').textContent = active.webhookUrl;
     $('forward-url').value = active.forwardUrl || '';
+    if ($('auto-forward')) $('auto-forward').checked = Boolean(active.autoForward);
     $('alert-kw').value = active.alertKeyword || '';
     $('notify-url').value = active.notifyWebhookUrl || '';
     $('alert-email').value = active.alertEmail || '';
@@ -385,6 +391,25 @@ async function openEvent(id) {
   $('ev-curl').textContent = buildCurlSnippet(data.event);
   $('curl-panel').open = false;
   $('replay-msg').hidden = true;
+  const afEl = $('auto-forward-status');
+  if (afEl) {
+    const af = data.event.autoForward;
+    if (af) {
+      afEl.hidden = false;
+      const bits = [
+        af.ok ? 'Auto-forward OK' : 'Auto-forward failed',
+        af.status != null ? `HTTP ${af.status}` : null,
+        af.ms != null ? `${af.ms}ms` : null,
+        af.error || null,
+        af.target ? `→ ${af.target}` : null,
+      ].filter(Boolean);
+      afEl.textContent = bits.join(' · ');
+      afEl.style.color = af.ok ? 'var(--ok, #3d9a5f)' : 'var(--danger)';
+    } else {
+      afEl.hidden = true;
+      afEl.textContent = '';
+    }
+  }
 }
 
 $('btn-back').onclick = () => {
@@ -492,6 +517,7 @@ $('btn-save-inbox').onclick = async () => {
       method: 'PATCH',
       body: JSON.stringify({
         forwardUrl: $('forward-url').value,
+        autoForward: Boolean($('auto-forward') && $('auto-forward').checked),
         alertKeyword: $('alert-kw').value,
         notifyWebhookUrl: $('notify-url').value,
         alertEmail: $('alert-email').value,
