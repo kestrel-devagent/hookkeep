@@ -93,6 +93,95 @@ function summarizeEvent(e) {
     contentType: e.contentType,
   };
 }
+
+const BODY_EXPORT_MAX = 8192;
+const BODY_CSV_PREVIEW = 200;
+
+function toExportEvent(e) {
+  const body = String(e.bodyText || '');
+  const truncated = body.length > BODY_EXPORT_MAX;
+  const out = {
+    id: e.id,
+    receivedAt: e.receivedAt,
+    method: e.method,
+    status: e.statusGuess != null ? e.statusGuess : null,
+    contentType: e.contentType || '',
+    bodyText: truncated ? body.slice(0, BODY_EXPORT_MAX) : body,
+    bodyTruncated: truncated || undefined,
+    size: e.size,
+  };
+  if (e.path) out.path = e.path;
+  if (e.url) out.url = e.url;
+  if (e.autoForward && typeof e.autoForward === 'object') {
+    out.autoForward = {
+      ok: Boolean(e.autoForward.ok),
+      status: e.autoForward.status ?? null,
+      ms: e.autoForward.ms ?? null,
+      error: e.autoForward.error || null,
+      target: e.autoForward.target || null,
+    };
+  }
+  return out;
+}
+
+function escapeCsvField(val) {
+  const s = val == null ? '' : String(val);
+  if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+function eventsToCsv(events) {
+  const header = ['id', 'receivedAt', 'method', 'status', 'contentType', 'bodyPreview', 'autoForwardOk'];
+  const lines = [header.join(',')];
+  for (const e of events) {
+    const body = String(e.bodyText || '');
+    const preview = body.slice(0, BODY_CSV_PREVIEW);
+    const af =
+      e.autoForward && typeof e.autoForward === 'object'
+        ? e.autoForward.ok
+          ? 'true'
+          : 'false'
+        : '';
+    lines.push(
+      [
+        escapeCsvField(e.id),
+        escapeCsvField(e.receivedAt),
+        escapeCsvField(e.method),
+        escapeCsvField(e.statusGuess != null ? e.statusGuess : ''),
+        escapeCsvField(e.contentType || ''),
+        escapeCsvField(preview),
+        escapeCsvField(af),
+      ].join(',')
+    );
+  }
+  return lines.join('\n') + '\n';
+}
+
+/** Collect filtered raw events (same predicates as list path). */
+async function collectFilteredEvents(kv, inboxId, limits, { q, methodFilter, statusMin, cap }) {
+  const listed = await kv.list({ prefix: `evt:${inboxId}:`, limit: limits.maxEventsKeep });
+  const events = [];
+  for (const k of listed.keys) {
+    if (events.length >= cap) break;
+    const ev = await kv.get(k.name, 'json');
+    if (!ev) continue;
+    if (q) {
+      const hay =
+        (ev.bodyText || '').toLowerCase().includes(q) ||
+        (ev.statusGuess || '').toLowerCase().includes(q) ||
+        (ev.method || '').toLowerCase().includes(q) ||
+        String(ev.id || '').includes(q);
+      if (!hay) continue;
+    }
+    if (methodFilter && String(ev.method || '').toUpperCase() !== methodFilter) continue;
+    if (statusMin != null && !Number.isNaN(statusMin)) {
+      const n = Number(String(ev.statusGuess ?? '').trim());
+      if (Number.isNaN(n) || n < statusMin) continue;
+    }
+    events.push(ev);
+  }
+  return events;
+}
 // ---- Pro alerts: keyword match OR HTTP status >= 400 → notify webhook + log ----
 
 function extractHttpStatus(event) {
@@ -669,6 +758,64 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
         return json({ inbox: { ...publicInbox(inbox), webhookUrl: `${baseUrl(request, env)}/hook/${inbox.id}` } });
       }
 
+      const exportMatch = path.match(/^\/api\/inboxes\/([^/]+)\/events\/export$/);
+      if (exportMatch && request.method === 'GET') {
+        const ws = await requireWs();
+        if (!ws) return json({ error: 'unauthorized' }, 401);
+        const inboxId = exportMatch[1];
+        const inbox = await getInbox(kv, inboxId);
+        if (!inbox || inbox.workspaceId !== ws.id) return json({ error: 'not_found' }, 404);
+        const format = String(url.searchParams.get('format') || 'json').toLowerCase();
+        if (format !== 'json' && format !== 'csv') {
+          return json({ error: 'bad_format', message: 'format must be json or csv' }, 400);
+        }
+        const limits = TIERS[ws.tier] || TIERS.free;
+        const limit = Number(url.searchParams.get('limit') || 50);
+        const cap = Math.min(limit || 50, limits.maxEventsKeep);
+        const q = (url.searchParams.get('q') || '').toLowerCase();
+        const methodFilter = (url.searchParams.get('method') || '').toUpperCase();
+        const statusMinRaw = url.searchParams.get('statusMin');
+        const statusMin =
+          statusMinRaw === null || statusMinRaw === '' ? null : Number(statusMinRaw);
+        const raw = await collectFilteredEvents(kv, inboxId, limits, {
+          q,
+          methodFilter,
+          statusMin,
+          cap,
+        });
+        const day = new Date().toISOString().slice(0, 10);
+        const filename = `hookkeep-events-${inboxId}-${day}.${format}`;
+        if (format === 'csv') {
+          return new Response(eventsToCsv(raw), {
+            status: 200,
+            headers: {
+              'content-type': 'text/csv; charset=utf-8',
+              'content-disposition': `attachment; filename="${filename}"`,
+              'access-control-allow-origin': '*',
+            },
+          });
+        }
+        const payload = {
+          exportedAt: new Date().toISOString(),
+          inboxId,
+          filters: {
+            q: q || undefined,
+            method: methodFilter || undefined,
+            statusMin: statusMin == null || Number.isNaN(statusMin) ? undefined : statusMin,
+            limit,
+          },
+          events: raw.map(toExportEvent),
+        };
+        return new Response(JSON.stringify(payload, null, 2) + '\n', {
+          status: 200,
+          headers: {
+            'content-type': 'application/json; charset=utf-8',
+            'content-disposition': `attachment; filename="${filename}"`,
+            'access-control-allow-origin': '*',
+          },
+        });
+      }
+
       const eventsMatch = path.match(/^\/api\/inboxes\/([^/]+)\/events$/);
       if (eventsMatch && request.method === 'GET') {
         const ws = await requireWs();
@@ -684,29 +831,13 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
         const statusMinRaw = url.searchParams.get('statusMin');
         const statusMin =
           statusMinRaw === null || statusMinRaw === '' ? null : Number(statusMinRaw);
-        // Keys sort newest-first; scan until we have `cap` matches (bounded by keep window)
-        const listed = await kv.list({ prefix: `evt:${inboxId}:`, limit: limits.maxEventsKeep });
-        const events = [];
-        for (const k of listed.keys) {
-          if (events.length >= cap) break;
-          const ev = await kv.get(k.name, 'json');
-          if (!ev) continue;
-          if (q) {
-            const hay =
-              (ev.bodyText || '').toLowerCase().includes(q) ||
-              (ev.statusGuess || '').toLowerCase().includes(q) ||
-              (ev.method || '').toLowerCase().includes(q) ||
-              String(ev.id || '').includes(q);
-            if (!hay) continue;
-          }
-          if (methodFilter && String(ev.method || '').toUpperCase() !== methodFilter) continue;
-          if (statusMin != null && !Number.isNaN(statusMin)) {
-            const n = Number(String(ev.statusGuess ?? '').trim());
-            if (Number.isNaN(n) || n < statusMin) continue;
-          }
-          events.push(summarizeEvent(ev));
-        }
-        return json({ events });
+        const raw = await collectFilteredEvents(kv, inboxId, limits, {
+          q,
+          methodFilter,
+          statusMin,
+          cap,
+        });
+        return json({ events: raw.map(summarizeEvent) });
       }
 
       const alertsMatch = path.match(/^\/api\/inboxes\/([^/]+)\/alerts$/);

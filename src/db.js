@@ -413,7 +413,11 @@ export function listAlerts(ws, inboxId, { limit = 20 } = {}) {
   return rows.slice(-Math.min(limit, 200)).reverse();
 }
 
-export function listEvents(ws, inboxId, { q = '', method = '', statusMin = null, limit = 50 } = {}) {
+const BODY_EXPORT_MAX = 8192;
+const BODY_CSV_PREVIEW = 200;
+
+/** Shared filter + keep-cap for listEvents / exportEvents (same semantics). */
+function queryInboxEvents(ws, inboxId, { q = '', method = '', statusMin = null, limit = 50 } = {}) {
   const db = read();
   const inbox = db.inboxes[inboxId];
   if (!inbox || inbox.workspaceId !== ws.id) return null;
@@ -442,8 +446,85 @@ export function listEvents(ws, inboxId, { q = '', method = '', statusMin = null,
       return !Number.isNaN(n) && n >= min;
     });
   }
-  const cap = Math.min(limit, limits.maxEventsKeep);
-  return rows.slice(0, cap).map(summarizeEvent);
+  const cap = Math.min(Number(limit) || 50, limits.maxEventsKeep);
+  return { rows: rows.slice(0, cap), inbox, limits, cap };
+}
+
+export function listEvents(ws, inboxId, opts = {}) {
+  const hit = queryInboxEvents(ws, inboxId, opts);
+  if (!hit) return null;
+  return hit.rows.map(summarizeEvent);
+}
+
+/** Full-ish rows for offline share / CSV (body truncated; same filters/cap as list). */
+export function toExportEvent(e) {
+  const body = String(e.bodyText || '');
+  const truncated = body.length > BODY_EXPORT_MAX;
+  const out = {
+    id: e.id,
+    receivedAt: e.receivedAt,
+    method: e.method,
+    status: e.statusGuess != null ? e.statusGuess : null,
+    contentType: e.contentType || '',
+    bodyText: truncated ? body.slice(0, BODY_EXPORT_MAX) : body,
+    bodyTruncated: truncated || undefined,
+    size: e.size,
+  };
+  if (e.path) out.path = e.path;
+  if (e.url) out.url = e.url;
+  if (e.autoForward && typeof e.autoForward === 'object') {
+    out.autoForward = {
+      ok: Boolean(e.autoForward.ok),
+      status: e.autoForward.status ?? null,
+      ms: e.autoForward.ms ?? null,
+      error: e.autoForward.error || null,
+      target: e.autoForward.target || null,
+    };
+  }
+  return out;
+}
+
+export function escapeCsvField(val) {
+  const s = val == null ? '' : String(val);
+  if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+export function eventsToCsv(events) {
+  const header = ['id', 'receivedAt', 'method', 'status', 'contentType', 'bodyPreview', 'autoForwardOk'];
+  const lines = [header.join(',')];
+  for (const e of events) {
+    const body = String(e.bodyText || '');
+    const preview = body.slice(0, BODY_CSV_PREVIEW);
+    const af =
+      e.autoForward && typeof e.autoForward === 'object'
+        ? e.autoForward.ok
+          ? 'true'
+          : 'false'
+        : '';
+    lines.push(
+      [
+        escapeCsvField(e.id),
+        escapeCsvField(e.receivedAt),
+        escapeCsvField(e.method),
+        escapeCsvField(e.statusGuess != null ? e.statusGuess : ''),
+        escapeCsvField(e.contentType || ''),
+        escapeCsvField(preview),
+        escapeCsvField(af),
+      ].join(',')
+    );
+  }
+  return lines.join('\n') + '\n';
+}
+
+export function exportEvents(ws, inboxId, opts = {}) {
+  const hit = queryInboxEvents(ws, inboxId, opts);
+  if (!hit) return null;
+  return {
+    events: hit.rows.map(toExportEvent),
+    raw: hit.rows,
+    cap: hit.cap,
+  };
 }
 
 export function getEvent(ws, eventId) {

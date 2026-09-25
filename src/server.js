@@ -177,6 +177,49 @@ app.patch('/api/inboxes/:id', async (c) => {
   return c.json({ inbox: { ...inbox, webhookUrl: `${baseUrl(c)}/hook/${inbox.id}` } });
 });
 
+app.get('/api/inboxes/:id/events/export', (c) => {
+  const ws = requireWs(c);
+  if (!ws) return c.json({ error: 'unauthorized' }, 401);
+  const inboxId = c.req.param('id');
+  const format = String(c.req.query('format') || 'json').toLowerCase();
+  if (format !== 'json' && format !== 'csv') {
+    return c.json({ error: 'bad_format', message: 'format must be json or csv' }, 400);
+  }
+  const q = c.req.query('q') || '';
+  const method = c.req.query('method') || '';
+  const statusMinRaw = c.req.query('statusMin');
+  const statusMin =
+    statusMinRaw === undefined || statusMinRaw === '' ? null : Number(statusMinRaw);
+  const limit = Number(c.req.query('limit') || 50);
+  const hit = db.exportEvents(ws, inboxId, { q, method, statusMin, limit });
+  if (!hit) return c.json({ error: 'not_found' }, 404);
+  const day = new Date().toISOString().slice(0, 10);
+  const filename = `hookkeep-events-${inboxId}-${day}.${format}`;
+  const filters = {
+    q: q || undefined,
+    method: method || undefined,
+    statusMin: statusMin == null || Number.isNaN(statusMin) ? undefined : statusMin,
+    limit,
+  };
+  if (format === 'csv') {
+    const csv = db.eventsToCsv(hit.raw);
+    return c.body(csv, 200, {
+      'content-type': 'text/csv; charset=utf-8',
+      'content-disposition': `attachment; filename="${filename}"`,
+    });
+  }
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    inboxId,
+    filters,
+    events: hit.events,
+  };
+  return c.body(JSON.stringify(payload, null, 2) + '\n', 200, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-disposition': `attachment; filename="${filename}"`,
+  });
+});
+
 app.get('/api/inboxes/:id/events', (c) => {
   const ws = requireWs(c);
   if (!ws) return c.json({ error: 'unauthorized' }, 401);

@@ -118,6 +118,8 @@
             <input id="filter-status-min" type="number" min="0" step="1" placeholder="Status ≥"
               aria-label="Minimum numeric statusGuess" style="width:6.5rem" />
             <button class="btn btn-sm" id="btn-refresh">Refresh</button>
+            <button class="btn btn-sm" id="btn-export-json" title="Download current filtered events as JSON">Export JSON</button>
+            <button class="btn btn-sm" id="btn-export-csv" title="Download current filtered events as CSV">Export CSV</button>
           </div>
           <div class="table-wrap">
             <table>
@@ -510,6 +512,39 @@ $('btn-refresh').onclick = () => loadEvents();
 $('search').oninput = debounce(() => loadEvents(), 250);
 if ($('filter-method')) $('filter-method').onchange = () => loadEvents();
 if ($('filter-status-min')) $('filter-status-min').oninput = debounce(() => loadEvents(), 250);
+
+async function downloadFilteredExport(format) {
+  if (!state.activeInboxId) return;
+  const q = $('search').value.trim();
+  const method = ($('filter-method') && $('filter-method').value) || '';
+  const statusMin = ($('filter-status-min') && $('filter-status-min').value.trim()) || '';
+  const qs = new URLSearchParams({ format });
+  if (q) qs.set('q', q);
+  if (method) qs.set('method', method);
+  if (statusMin !== '') qs.set('statusMin', statusMin);
+  try {
+    const res = await fetch(`/api/inboxes/${state.activeInboxId}/events/export?${qs.toString()}`, {
+      headers: { 'x-hookkeep-token': token },
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      toast(humanError({ data, message: data.error || res.statusText }), true);
+      return;
+    }
+    const blob = await res.blob();
+    const day = new Date().toISOString().slice(0, 10);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `hookkeep-events-${state.activeInboxId}-${day}.${format}`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast(`Exported ${format.toUpperCase()} download started.`);
+  } catch (e) {
+    toast(humanError(e), true);
+  }
+}
+if ($('btn-export-json')) $('btn-export-json').onclick = () => downloadFilteredExport('json');
+if ($('btn-export-csv')) $('btn-export-csv').onclick = () => downloadFilteredExport('csv');
 
 $('btn-save-inbox').onclick = async () => {
   try {

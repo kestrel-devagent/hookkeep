@@ -75,6 +75,7 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
 - `GET /api/workspace` + header `x-hookkeep-token`
 - `PATCH /api/inboxes/:id` `{ name?, forwardUrl?, autoForward?, alertKeyword?, alertEmail?, notifyWebhookUrl? }`
 - `GET /api/inboxes/:id/events?q=&method=&statusMin=` (text / HTTP method / status ≥ N)
+- `GET /api/inboxes/:id/events/export?format=json|csv&q=&method=&statusMin=&limit=` → bulk download of the **current filtered** set (same filters/cap as list; free tier OK)
 - `GET /api/inboxes/:id/alerts?limit=20` → recent Pro alert records
 - `GET /api/events/:id`
 - `POST /api/events/:id/replay` `{ "targetUrl?: string" }`
@@ -86,8 +87,8 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
 - `POST /api/waitlist` `{ "email", "note?" }`
 - Operator: `npm run digest-waitlist` → mailto draft of waitlist + Stripe unlock path (no SMTP)
 - Operator: `npm run status` → health + waitlist count + demo URL from `docs/demo.json`
-- Dashboard: filter events by text (`q`), HTTP `method`, and numeric `statusMin` (`GET /api/inboxes/:id/events`)
-- Workers KV path mirrors the same `q` / `method` / `statusMin` filters as Node
+- Dashboard: filter events by text (`q`), HTTP `method`, and numeric `statusMin` (`GET /api/inboxes/:id/events`); **Export JSON / Export CSV** downloads the filtered set
+- Workers KV path mirrors the same `q` / `method` / `statusMin` filters as Node (incl. `/events/export`)
 - Workers `POST /api/stripe/fulfill` mirrors Node (gate: `FULFILL_SECRET` / `HOOKKEEP_FULFILL_SECRET` + `x-fulfill-secret`)
 - `GET /subscribe` → redirect to billing host (or helpful setup page)
 - `GET /api/health` → `dataDir`, `persistOk`, `workspaceCount`, `billing`

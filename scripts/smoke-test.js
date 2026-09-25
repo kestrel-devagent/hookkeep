@@ -135,6 +135,35 @@ async function main() {
   check(byCombo.events.some((e) => e.id === ingest400.id), 'combined filter missed 502 POST');
   check(!byCombo.events.some((e) => e.id === ingestGet.id), 'combined filter should exclude GET');
 
+  step('export filtered events JSON');
+  const expJsonRes = await fetch(
+    `${BASE}/api/inboxes/${created.inbox.id}/events/export?format=json&q=${encodeURIComponent('payment')}`,
+    { headers: { 'x-hookkeep-token': created.ownerToken } }
+  );
+  check(expJsonRes.ok, `export json status ${expJsonRes.status}`);
+  check((expJsonRes.headers.get('content-type') || '').includes('application/json'), 'export json content-type');
+  const expJson = await expJsonRes.json();
+  check(Array.isArray(expJson.events), 'export json missing events array');
+  check(expJson.inboxId === created.inbox.id, 'export json inboxId mismatch');
+  check(expJson.events.some((e) => e.id === ingest.id), 'export json missed payment event');
+  check(expJson.events.every((e) => e.id && e.receivedAt && e.method), 'export json row shape');
+  console.log('export json', expJson.events.length, 'events');
+
+  step('export filtered events CSV');
+  const expCsvRes = await fetch(
+    `${BASE}/api/inboxes/${created.inbox.id}/events/export?format=csv`,
+    { headers: { 'x-hookkeep-token': created.ownerToken } }
+  );
+  check(expCsvRes.ok, `export csv status ${expCsvRes.status}`);
+  check((expCsvRes.headers.get('content-type') || '').includes('text/csv'), 'export csv content-type');
+  const expCsv = await expCsvRes.text();
+  const csvLines = expCsv.trim().split(/\r?\n/);
+  check(csvLines[0] === 'id,receivedAt,method,status,contentType,bodyPreview,autoForwardOk', 'csv header mismatch');
+  check(csvLines.length >= 3, `csv expected header+rows, got ${csvLines.length}`);
+  check(expCsv.includes(ingest.id), 'csv missing payment event id');
+  check(expCsv.includes(ingestGet.id), 'csv missing GET event id');
+  console.log('export csv lines', csvLines.length);
+
   step('replay without forwardUrl → no_forward_url');
   const noFwd = await fetch(`${BASE}/api/events/${ingest.id}/replay`, {
     method: 'POST',
