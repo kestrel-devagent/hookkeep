@@ -1,5 +1,5 @@
 /** Local smoke test against a running server (default http://127.0.0.1:8787)
- * Steps: create → ingest → list → forwardUrl → replay → auto-forward → demo unlock → pro alerts → free tier
+ * Steps: create → ingest → list → export → forwardUrl → replay → replay-bulk → auto-forward → demo unlock → pro alerts → free tier
  */
 import http from 'node:http';
 import fs from 'node:fs';
@@ -191,6 +191,49 @@ async function main() {
   check(replay.ok === true && replay.status === 200, `replay failed: ${JSON.stringify(replay)}`);
   check(caught.length === caughtBefore + 1, 'catcher did not receive replay');
   check(caught[caught.length - 1].body.includes('payment.failed'), 'catcher body mismatch');
+
+  step('bulk replay-filtered without target → no_forward_url');
+  await fetch(`${BASE}/api/inboxes/${created.inbox.id}`, {
+    method: 'PATCH',
+    headers: auth,
+    body: JSON.stringify({ forwardUrl: '' }),
+  }).then((r) => r.json());
+  const bulkNoT = await fetch(`${BASE}/api/inboxes/${created.inbox.id}/events/replay-bulk`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ q: 'payment' }),
+  }).then(async (r) => ({ status: r.status, ...(await r.json()) }));
+  check(bulkNoT.status === 400 && bulkNoT.error === 'no_forward_url', `bulk no target: ${JSON.stringify(bulkNoT)}`);
+
+  step('bulk replay filtered q=payment');
+  await fetch(`${BASE}/api/inboxes/${created.inbox.id}`, {
+    method: 'PATCH',
+    headers: auth,
+    body: JSON.stringify({ forwardUrl: replayUrl }),
+  }).then((r) => r.json());
+  const bulkCaughtBefore = caught.length;
+  const bulk = await fetch(`${BASE}/api/inboxes/${created.inbox.id}/events/replay-bulk`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ q: 'payment', limit: 50 }),
+  }).then((r) => r.json());
+  console.log('bulk replay', bulk.attempted, bulk.succeeded, bulk.failed, bulk.target);
+  check(bulk.ok === true, `bulk not ok: ${JSON.stringify(bulk)}`);
+  check(bulk.inboxId === created.inbox.id, 'bulk inboxId mismatch');
+  check(bulk.attempted >= 1 && bulk.succeeded === bulk.attempted, 'bulk attempted/succeeded mismatch');
+  check(Array.isArray(bulk.results) && bulk.results.every((r) => r.id && r.ok === true), 'bulk results shape');
+  check(bulk.results.some((r) => r.id === ingest.id), 'bulk missed payment event');
+  check(caught.length === bulkCaughtBefore + bulk.attempted, `catcher expected +${bulk.attempted}, got ${caught.length - bulkCaughtBefore}`);
+  check((bulk.filters && bulk.filters.q === 'payment'), 'bulk filters.q missing');
+
+  step('bulk replay hard max 50');
+  const bulkCap = await fetch(`${BASE}/api/inboxes/${created.inbox.id}/events/replay-bulk`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ limit: 999, method: 'POST' }),
+  }).then((r) => r.json());
+  check(bulkCap.filters?.limit === 50, `hard max expected 50, got ${bulkCap.filters?.limit}`);
+  check(bulkCap.attempted <= 50, `attempted over hard max: ${bulkCap.attempted}`);
 
   step('auto-forward on ingest (free tier OK)');
   const afPatch = await fetch(`${BASE}/api/inboxes/${created.inbox.id}`, {

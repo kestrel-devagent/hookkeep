@@ -76,6 +76,7 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
 - `PATCH /api/inboxes/:id` `{ name?, forwardUrl?, autoForward?, alertKeyword?, alertEmail?, notifyWebhookUrl? }`
 - `GET /api/inboxes/:id/events?q=&method=&statusMin=` (text / HTTP method / status ≥ N)
 - `GET /api/inboxes/:id/events/export?format=json|csv&q=&method=&statusMin=&limit=` → bulk download of the **current filtered** set (same filters/cap as list; free tier OK)
+- `POST /api/inboxes/:id/events/replay-bulk` `{ targetUrl?, q?, method?, statusMin?, limit? }` → serially replay the **current filtered** set via the same forward path (default/hard max 50; free tier OK). Target = `targetUrl` else inbox `forwardUrl`; neither → 400 `no_forward_url`.
 - `GET /api/inboxes/:id/alerts?limit=20` → recent Pro alert records
 - `GET /api/events/:id`
 - `POST /api/events/:id/replay` `{ "targetUrl?: string" }`
@@ -87,8 +88,8 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
 - `POST /api/waitlist` `{ "email", "note?" }`
 - Operator: `npm run digest-waitlist` → mailto draft of waitlist + Stripe unlock path (no SMTP)
 - Operator: `npm run status` → health + waitlist count + demo URL from `docs/demo.json`
-- Dashboard: filter events by text (`q`), HTTP `method`, and numeric `statusMin` (`GET /api/inboxes/:id/events`); **Export JSON / Export CSV** downloads the filtered set
-- Workers KV path mirrors the same `q` / `method` / `statusMin` filters as Node (incl. `/events/export`)
+- Dashboard: filter events by text (`q`), HTTP `method`, and numeric `statusMin` (`GET /api/inboxes/:id/events`); **Export JSON / Export CSV** downloads the filtered set; **Replay filtered** bulk-forwards it
+- Workers KV path mirrors the same `q` / `method` / `statusMin` filters as Node (incl. `/events/export` + `/events/replay-bulk`)
 - Workers `POST /api/stripe/fulfill` mirrors Node (gate: `FULFILL_SECRET` / `HOOKKEEP_FULFILL_SECRET` + `x-fulfill-secret`)
 - `GET /subscribe` → redirect to billing host (or helpful setup page)
 - `GET /api/health` → `dataDir`, `persistOk`, `workspaceCount`, `billing`

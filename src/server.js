@@ -220,6 +220,39 @@ app.get('/api/inboxes/:id/events/export', (c) => {
   });
 });
 
+app.post('/api/inboxes/:id/events/replay-bulk', async (c) => {
+  const ws = requireWs(c);
+  if (!ws) return c.json({ error: 'unauthorized' }, 401);
+  const inboxId = c.req.param('id');
+  const body = await c.req.json().catch(() => ({}));
+  const q = body.q != null ? String(body.q) : '';
+  const method = body.method != null ? String(body.method) : '';
+  const statusMinRaw = body.statusMin;
+  const statusMin =
+    statusMinRaw === undefined || statusMinRaw === null || statusMinRaw === ''
+      ? null
+      : Number(statusMinRaw);
+  const limit = body.limit != null ? Number(body.limit) : 50;
+  const result = await db.replayEventsBulk(ws, inboxId, {
+    targetUrl: body.targetUrl,
+    q,
+    method,
+    statusMin,
+    limit,
+  });
+  if (!result) return c.json({ error: 'not_found' }, 404);
+  if (result.error === 'no_forward_url') {
+    return c.json(
+      {
+        error: 'no_forward_url',
+        message: result.message || 'Set body.targetUrl or inbox forwardUrl before bulk replay',
+      },
+      400
+    );
+  }
+  return c.json(result, result.ok ? 200 : 207);
+});
+
 app.get('/api/inboxes/:id/events', (c) => {
   const ws = requireWs(c);
   if (!ws) return c.json({ error: 'unauthorized' }, 401);

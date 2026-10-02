@@ -1,7 +1,7 @@
 # Workers port — STATUS
 
 **Author:** Devin SWE-2 medium (+ orchestrator finish)
-**Updated:** 2026-09-25
+**Updated:** 2026-10-02
 
 ## What works (code complete; deploy needs CF account)
 
@@ -32,10 +32,12 @@ Canonical live demo remains the Node + trycloudflare tunnel.
 | Static UI | `@hono/node-server` static | Workers Assets |
 | Event filters (`q`/`method`/`statusMin`) | Node `listEvents` | Workers KV list path (parity 2026-09-22) |
 | Bulk events export JSON/CSV | Node `/events/export` | Workers same route (parity 2026-09-25) |
+| Bulk replay filtered | Node `/events/replay-bulk` | Workers same route (parity 2026-10-02) |
 | Local smoke | `npm test` | needs `wrangler dev` |
 
 ## Done recently
 
+- 2026-10-02: bulk replay of filtered events — `POST /api/inboxes/:id/events/replay-bulk` (same filters; hard max 50; serial via existing forward path); dashboard **Replay filtered**; unit `workers-replay-bulk-unit.js`.
 - 2026-09-25: bulk filtered events export — `GET /api/inboxes/:id/events/export?format=json|csv` (same q/method/statusMin + list cap); dashboard Export JSON/CSV; unit `workers-export-unit.js`.
 - 2026-09-24: auto-forward on ingest parity — inbox `autoForward` boolean + `forwardUrl`; after store, POST capture to forwardUrl (~8s) and persist `event.autoForward` (Node sync + Workers `waitUntil`). Free tier allowed.
 - 2026-09-23: ported Node `POST /api/stripe/fulfill` into Workers (auth gate, mint-from-sessionId, redeem, email index `email:<em>`). Unit: `scripts/workers-fulfill-unit.js`.

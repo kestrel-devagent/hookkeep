@@ -644,6 +644,58 @@ export async function replayEvent(ws, eventId, { targetUrl } = {}) {
   return forwardCapturedEvent(ev, url, { timeoutMs: 15_000, auto: false });
 }
 
+/**
+ * Bulk replay of the current filtered event set (same filters/cap as list/export).
+ * Hard max 50. Replays serially via replayEvent / forwardCapturedEvent.
+ * Returns null if inbox not found; { error: 'no_forward_url', ... } if no target.
+ */
+export async function replayEventsBulk(
+  ws,
+  inboxId,
+  { targetUrl, q = '', method = '', statusMin = null, limit = 50 } = {}
+) {
+  const HARD_MAX = 50;
+  const reqLimit = Math.min(Number(limit) || 50, HARD_MAX);
+  const hit = queryInboxEvents(ws, inboxId, { q, method, statusMin, limit: reqLimit });
+  if (!hit) return null;
+  const target = String(targetUrl || (hit.inbox && hit.inbox.forwardUrl) || '').trim();
+  if (!target) {
+    return {
+      error: 'no_forward_url',
+      message: 'Set body.targetUrl or inbox forwardUrl before bulk replay',
+    };
+  }
+  const filters = {
+    q: q || undefined,
+    method: method || undefined,
+    statusMin: statusMin == null || statusMin === '' || Number.isNaN(Number(statusMin)) ? undefined : Number(statusMin),
+    limit: reqLimit,
+  };
+  const results = [];
+  let succeeded = 0;
+  let failed = 0;
+  for (const row of hit.rows) {
+    const r = await replayEvent(ws, row.id, { targetUrl: target });
+    const compact = { id: row.id, ok: Boolean(r && r.ok) };
+    if (r && r.status != null) compact.status = r.status;
+    if (r && r.ms != null) compact.ms = r.ms;
+    if (r && !r.ok) compact.error = r.error || r.message || 'forward_failed';
+    results.push(compact);
+    if (compact.ok) succeeded += 1;
+    else failed += 1;
+  }
+  return {
+    ok: failed === 0,
+    inboxId,
+    target,
+    filters,
+    attempted: results.length,
+    succeeded,
+    failed,
+    results,
+  };
+}
+
 export function addWaitlist({ email, note = '' }) {
   const db = read();
   const em = String(email || '').trim().toLowerCase();

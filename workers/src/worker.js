@@ -816,6 +816,73 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
         });
       }
 
+      const replayBulkMatch = path.match(/^\/api\/inboxes\/([^/]+)\/events\/replay-bulk$/);
+      if (replayBulkMatch && request.method === 'POST') {
+        const ws = await requireWs();
+        if (!ws) return json({ error: 'unauthorized' }, 401);
+        const inboxId = replayBulkMatch[1];
+        const inbox = await getInbox(kv, inboxId);
+        if (!inbox || inbox.workspaceId !== ws.id) return json({ error: 'not_found' }, 404);
+        const body = await bodyJson();
+        const HARD_MAX = 50;
+        const limits = TIERS[ws.tier] || TIERS.free;
+        const reqLimit = Math.min(Number(body.limit) || 50, HARD_MAX);
+        const cap = Math.min(reqLimit, limits.maxEventsKeep);
+        const q = String(body.q || '').toLowerCase();
+        const methodFilter = String(body.method || '').toUpperCase();
+        const statusMinRaw = body.statusMin;
+        const statusMin =
+          statusMinRaw === undefined || statusMinRaw === null || statusMinRaw === ''
+            ? null
+            : Number(statusMinRaw);
+        const target = String(body.targetUrl || inbox.forwardUrl || '').trim();
+        if (!target) {
+          return json(
+            {
+              error: 'no_forward_url',
+              message: 'Set body.targetUrl or inbox forwardUrl before bulk replay',
+            },
+            400
+          );
+        }
+        const raw = await collectFilteredEvents(kv, inboxId, limits, {
+          q,
+          methodFilter,
+          statusMin,
+          cap,
+        });
+        const filters = {
+          q: q || undefined,
+          method: methodFilter || undefined,
+          statusMin: statusMin == null || Number.isNaN(statusMin) ? undefined : statusMin,
+          limit: reqLimit,
+        };
+        const results = [];
+        let succeeded = 0;
+        let failed = 0;
+        for (const ev of raw) {
+          const r = await forwardCapturedEvent(ev, target, { timeoutMs: 15_000, auto: false });
+          const compact = { id: ev.id, ok: Boolean(r && r.ok) };
+          if (r && r.status != null) compact.status = r.status;
+          if (r && r.ms != null) compact.ms = r.ms;
+          if (r && !r.ok) compact.error = r.error || r.message || 'forward_failed';
+          results.push(compact);
+          if (compact.ok) succeeded += 1;
+          else failed += 1;
+        }
+        const payload = {
+          ok: failed === 0,
+          inboxId,
+          target,
+          filters,
+          attempted: results.length,
+          succeeded,
+          failed,
+          results,
+        };
+        return json(payload, payload.ok ? 200 : 207);
+      }
+
       const eventsMatch = path.match(/^\/api\/inboxes\/([^/]+)\/events$/);
       if (eventsMatch && request.method === 'GET') {
         const ws = await requireWs();
