@@ -696,6 +696,46 @@ export async function replayEventsBulk(
   };
 }
 
+/**
+ * Bulk delete of the current filtered event set (same filters/cap as list/export/replay-bulk).
+ * Hard max 50. Requires confirm === true.
+ * Returns null if inbox not found; { error: 'confirm_required', ... } without confirm.
+ */
+export function deleteEventsBulk(
+  ws,
+  inboxId,
+  { q = '', method = '', statusMin = null, limit = 50, confirm = false } = {}
+) {
+  const HARD_MAX = 50;
+  const reqLimit = Math.min(Number(limit) || 50, HARD_MAX);
+  const hit = queryInboxEvents(ws, inboxId, { q, method, statusMin, limit: reqLimit });
+  if (!hit) return null;
+  if (confirm !== true) {
+    return {
+      error: 'confirm_required',
+      message: 'Set body.confirm=true to delete the filtered events (irreversible)',
+    };
+  }
+  const filters = {
+    q: q || undefined,
+    method: method || undefined,
+    statusMin: statusMin == null || statusMin === '' || Number.isNaN(Number(statusMin)) ? undefined : Number(statusMin),
+    limit: reqLimit,
+  };
+  const db = read();
+  const inbox = db.inboxes[inboxId];
+  const ids = [];
+  for (const row of hit.rows) {
+    if (db.events[row.id] && db.events[row.id].inboxId === inboxId) {
+      delete db.events[row.id];
+      ids.push(row.id);
+    }
+  }
+  if (inbox) inbox.eventCount = Math.max(0, (inbox.eventCount || 0) - ids.length);
+  write(db);
+  return { ok: true, inboxId, filters, deleted: ids.length, ids };
+}
+
 export function addWaitlist({ email, note = '' }) {
   const db = read();
   const em = String(email || '').trim().toLowerCase();

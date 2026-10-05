@@ -158,7 +158,7 @@ function eventsToCsv(events) {
 }
 
 /** Collect filtered raw events (same predicates as list path). */
-async function collectFilteredEvents(kv, inboxId, limits, { q, methodFilter, statusMin, cap }) {
+async function collectFilteredEvents(kv, inboxId, limits, { q, methodFilter, statusMin, cap, outKeys = null }) {
   const listed = await kv.list({ prefix: `evt:${inboxId}:`, limit: limits.maxEventsKeep });
   const events = [];
   for (const k of listed.keys) {
@@ -179,6 +179,7 @@ async function collectFilteredEvents(kv, inboxId, limits, { q, methodFilter, sta
       if (Number.isNaN(n) || n < statusMin) continue;
     }
     events.push(ev);
+    if (outKeys) outKeys.push(k.name);
   }
   return events;
 }
@@ -881,6 +882,55 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           results,
         };
         return json(payload, payload.ok ? 200 : 207);
+      }
+
+      const deleteBulkMatch = path.match(/^\/api\/inboxes\/([^/]+)\/events\/delete-bulk$/);
+      if (deleteBulkMatch && request.method === 'POST') {
+        const ws = await requireWs();
+        if (!ws) return json({ error: 'unauthorized' }, 401);
+        const inboxId = deleteBulkMatch[1];
+        const inbox = await getInbox(kv, inboxId);
+        if (!inbox || inbox.workspaceId !== ws.id) return json({ error: 'not_found' }, 404);
+        const body = await bodyJson();
+        if (body.confirm !== true) {
+          return json(
+            {
+              error: 'confirm_required',
+              message: 'Set body.confirm=true to delete the filtered events (irreversible)',
+            },
+            400
+          );
+        }
+        const HARD_MAX = 50;
+        const limits = TIERS[ws.tier] || TIERS.free;
+        const reqLimit = Math.min(Number(body.limit) || 50, HARD_MAX);
+        const cap = Math.min(reqLimit, limits.maxEventsKeep);
+        const q = String(body.q || '').toLowerCase();
+        const methodFilter = String(body.method || '').toUpperCase();
+        const statusMinRaw = body.statusMin;
+        const statusMin =
+          statusMinRaw === undefined || statusMinRaw === null || statusMinRaw === ''
+            ? null
+            : Number(statusMinRaw);
+        const keys = [];
+        const raw = await collectFilteredEvents(kv, inboxId, limits, {
+          q,
+          methodFilter,
+          statusMin,
+          cap,
+          outKeys: keys,
+        });
+        await Promise.all(keys.map((k) => kv.delete(k)));
+        const ids = raw.map((ev) => ev.id);
+        inbox.eventCount = Math.max(0, (inbox.eventCount || 0) - ids.length);
+        await kv.put(`inbox:${inboxId}`, JSON.stringify(inbox));
+        const filters = {
+          q: q || undefined,
+          method: methodFilter || undefined,
+          statusMin: statusMin == null || Number.isNaN(statusMin) ? undefined : statusMin,
+          limit: reqLimit,
+        };
+        return json({ ok: true, inboxId, filters, deleted: ids.length, ids }, 200);
       }
 
       const eventsMatch = path.match(/^\/api\/inboxes\/([^/]+)\/events$/);

@@ -1,5 +1,5 @@
 /** Local smoke test against a running server (default http://127.0.0.1:8787)
- * Steps: create → ingest → list → export → forwardUrl → replay → replay-bulk → auto-forward → demo unlock → pro alerts → free tier
+ * Steps: create → ingest → list → export → forwardUrl → replay → replay-bulk → delete-bulk → auto-forward → demo unlock → pro alerts → free tier
  */
 import http from 'node:http';
 import fs from 'node:fs';
@@ -234,6 +234,86 @@ async function main() {
   }).then((r) => r.json());
   check(bulkCap.filters?.limit === 50, `hard max expected 50, got ${bulkCap.filters?.limit}`);
   check(bulkCap.attempted <= 50, `attempted over hard max: ${bulkCap.attempted}`);
+
+  step('bulk delete-filtered: ingest 3 cleanup events');
+  const cleanupIds = [];
+  for (let i = 0; i < 3; i++) {
+    const r = await fetch(hook, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ event: 'cleanup.marker', n: i }),
+    }).then((r) => r.json());
+    check(r.ok && r.id, `cleanup ingest ${i} failed`);
+    cleanupIds.push(r.id);
+  }
+  const wsBeforeDel = await fetch(`${BASE}/api/workspace`, { headers: auth }).then((r) => r.json());
+  const countBeforeDel = (wsBeforeDel.inboxes.find((i) => i.id === created.inbox.id) || {}).eventCount;
+  const delFiltered = await fetch(
+    `${BASE}/api/inboxes/${created.inbox.id}/events?q=${encodeURIComponent('cleanup.marker')}`,
+    { headers: auth }
+  ).then((r) => r.json());
+  check(delFiltered.events.length === 3, `cleanup filter expected 3, got ${delFiltered.events.length}`);
+
+  step('bulk delete-filtered unauthorized → 401');
+  const delUnauth = await fetch(`${BASE}/api/inboxes/${created.inbox.id}/events/delete-bulk`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ q: 'cleanup.marker', confirm: true }),
+  });
+  check(delUnauth.status === 401, `delete-bulk unauth expected 401, got ${delUnauth.status}`);
+
+  step('bulk delete-filtered unknown inbox → 404');
+  const del404 = await fetch(`${BASE}/api/inboxes/inb_nope/events/delete-bulk`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ q: 'cleanup.marker', confirm: true }),
+  });
+  check(del404.status === 404, `delete-bulk unknown inbox expected 404, got ${del404.status}`);
+
+  step('bulk delete-filtered without confirm → 400 confirm_required');
+  const delNoConfirm = await fetch(`${BASE}/api/inboxes/${created.inbox.id}/events/delete-bulk`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ q: 'cleanup.marker' }),
+  }).then(async (r) => ({ status: r.status, ...(await r.json()) }));
+  check(
+    delNoConfirm.status === 400 && delNoConfirm.error === 'confirm_required',
+    `delete no confirm: ${JSON.stringify(delNoConfirm)}`
+  );
+  const stillThere = await fetch(
+    `${BASE}/api/inboxes/${created.inbox.id}/events?q=${encodeURIComponent('cleanup.marker')}`,
+    { headers: auth }
+  ).then((r) => r.json());
+  check(stillThere.events.length === 3, 'events deleted without confirm');
+
+  step('bulk delete-filtered with confirm → deleted');
+  const del = await fetch(`${BASE}/api/inboxes/${created.inbox.id}/events/delete-bulk`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ q: 'cleanup.marker', confirm: true }),
+  }).then(async (r) => ({ status: r.status, ...(await r.json()) }));
+  console.log('bulk delete', del.status, del.deleted, del.ids);
+  check(del.status === 200 && del.ok === true, `delete-bulk not ok: ${JSON.stringify(del)}`);
+  check(del.inboxId === created.inbox.id, 'delete inboxId mismatch');
+  check(del.deleted === 3, `expected 3 deleted, got ${del.deleted}`);
+  check(Array.isArray(del.ids) && cleanupIds.every((id) => del.ids.includes(id)), 'delete ids mismatch');
+  check(del.filters && del.filters.q === 'cleanup.marker' && del.filters.limit === 50, 'delete filters shape');
+
+  step('list no longer shows deleted events; others intact; eventCount decremented');
+  const afterDel = await fetch(
+    `${BASE}/api/inboxes/${created.inbox.id}/events?q=${encodeURIComponent('cleanup.marker')}`,
+    { headers: auth }
+  ).then((r) => r.json());
+  check(afterDel.events.length === 0, `deleted events still listed: ${afterDel.events.length}`);
+  const allAfter = await fetch(`${BASE}/api/inboxes/${created.inbox.id}/events`, { headers: auth }).then((r) => r.json());
+  check(allAfter.events.some((e) => e.id === ingest.id), 'delete-bulk removed unrelated payment event');
+  const delGone = await fetch(`${BASE}/api/events/${cleanupIds[0]}`, { headers: auth });
+  check(delGone.status === 404, `deleted event detail expected 404, got ${delGone.status}`);
+  const wsAfterDel = await fetch(`${BASE}/api/workspace`, { headers: auth }).then((r) => r.json());
+  const countAfterDel = (wsAfterDel.inboxes.find((i) => i.id === created.inbox.id) || {}).eventCount;
+  if (typeof countBeforeDel === 'number') {
+    check(countAfterDel === Math.max(0, countBeforeDel - 3), `eventCount ${countBeforeDel} → ${countAfterDel}`);
+  }
 
   step('auto-forward on ingest (free tier OK)');
   const afPatch = await fetch(`${BASE}/api/inboxes/${created.inbox.id}`, {

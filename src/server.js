@@ -253,6 +253,39 @@ app.post('/api/inboxes/:id/events/replay-bulk', async (c) => {
   return c.json(result, result.ok ? 200 : 207);
 });
 
+app.post('/api/inboxes/:id/events/delete-bulk', async (c) => {
+  const ws = requireWs(c);
+  if (!ws) return c.json({ error: 'unauthorized' }, 401);
+  const inboxId = c.req.param('id');
+  const body = await c.req.json().catch(() => ({}));
+  const q = body.q != null ? String(body.q) : '';
+  const method = body.method != null ? String(body.method) : '';
+  const statusMinRaw = body.statusMin;
+  const statusMin =
+    statusMinRaw === undefined || statusMinRaw === null || statusMinRaw === ''
+      ? null
+      : Number(statusMinRaw);
+  const limit = body.limit != null ? Number(body.limit) : 50;
+  const result = db.deleteEventsBulk(ws, inboxId, {
+    q,
+    method,
+    statusMin,
+    limit,
+    confirm: body.confirm === true,
+  });
+  if (!result) return c.json({ error: 'not_found' }, 404);
+  if (result.error === 'confirm_required') {
+    return c.json(
+      {
+        error: 'confirm_required',
+        message: result.message || 'Set body.confirm=true to delete the filtered events',
+      },
+      400
+    );
+  }
+  return c.json(result, 200);
+});
+
 app.get('/api/inboxes/:id/events', (c) => {
   const ws = requireWs(c);
   if (!ws) return c.json({ error: 'unauthorized' }, 401);

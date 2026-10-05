@@ -121,6 +121,7 @@
             <button class="btn btn-sm" id="btn-export-json" title="Download current filtered events as JSON">Export JSON</button>
             <button class="btn btn-sm" id="btn-export-csv" title="Download current filtered events as CSV">Export CSV</button>
             <button class="btn btn-sm" id="btn-replay-filtered" title="Replay current filtered events to Forward URL">Replay filtered</button>
+            <button class="btn btn-sm btn-danger" id="btn-delete-filtered" title="Delete current filtered events (max 50, irreversible)">Delete filtered</button>
             <span id="replay-bulk-status" class="muted" style="font-size:0.85rem" hidden></span>
           </div>
           <div class="table-wrap">
@@ -196,6 +197,7 @@ const ERRORS = {
   invalid_code: 'That unlock code is not valid.',
   code_used: 'That unlock code was already used on another workspace.',
   not_found: 'Not found.',
+  confirm_required: 'Confirm required before bulk delete.',
 };
 function humanError(e) {
   const code = e?.data?.error || e?.message || '';
@@ -589,6 +591,50 @@ async function replayFilteredEvents() {
   }
 }
 if ($('btn-replay-filtered')) $('btn-replay-filtered').onclick = () => replayFilteredEvents();
+
+async function deleteFilteredEvents() {
+  if (!state.activeInboxId) return;
+  const btn = $('btn-delete-filtered');
+  const statusEl = $('replay-bulk-status');
+  const q = $('search').value.trim();
+  const method = ($('filter-method') && $('filter-method').value) || '';
+  const statusMin = ($('filter-status-min') && $('filter-status-min').value.trim()) || '';
+  const count = document.querySelectorAll('#events-body tr[data-id]').length;
+  if (count === 0) {
+    toast('No filtered events to delete.', true);
+    return;
+  }
+  const n = Math.min(count, 50);
+  if (!confirm(`Delete ${n} filtered event${n === 1 ? '' : 's'}? This cannot be undone.`)) return;
+  const body = { confirm: true };
+  if (q) body.q = q;
+  if (method) body.method = method;
+  if (statusMin !== '') body.statusMin = Number(statusMin);
+  if (btn) btn.disabled = true;
+  if (statusEl) {
+    statusEl.hidden = false;
+    statusEl.textContent = 'Deleting…';
+  }
+  try {
+    const data = await api(`/api/inboxes/${state.activeInboxId}/events/delete-bulk`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    const ids = Array.isArray(data.ids) ? data.ids : [];
+    if (state.currentEvent && ids.includes(state.currentEvent.id)) state.currentEvent = null;
+    const msg = `Deleted ${data.deleted || 0} event${data.deleted === 1 ? '' : 's'}`;
+    if (statusEl) statusEl.textContent = msg;
+    toast(msg);
+    await loadEvents();
+  } catch (e) {
+    const err = humanError(e);
+    if (statusEl) statusEl.textContent = err;
+    toast(err, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+if ($('btn-delete-filtered')) $('btn-delete-filtered').onclick = () => deleteFilteredEvents();
 
 $('btn-save-inbox').onclick = async () => {
   try {
