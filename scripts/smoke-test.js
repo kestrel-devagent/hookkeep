@@ -1,5 +1,5 @@
 /** Local smoke test against a running server (default http://127.0.0.1:8787)
- * Steps: create → ingest → list → export → forwardUrl → replay → replay-bulk → delete-bulk → auto-forward → demo unlock → pro alerts → free tier
+ * Steps: create → ingest → list → export → forwardUrl → replay → replay-bulk → delete-bulk → auto-forward → demo unlock → pro alerts → free tier → custom response
  */
 import http from 'node:http';
 import fs from 'node:fs';
@@ -411,6 +411,62 @@ async function main() {
   }).then((r) => r.json());
   check(!freeIngest.alert && alertLines() === freeBefore, 'free tier fired an alert');
   console.log('free-tier ingest alert:', freeIngest.alert ?? null, '(expect null)');
+
+  step('custom ingest response (status/body/content-type)');
+  const crHdr = { 'x-hookkeep-token': free.ownerToken, 'content-type': 'application/json' };
+  const crPatch = (body) =>
+    fetch(`${BASE}/api/inboxes/${free.inbox.id}`, { method: 'PATCH', headers: crHdr, body: JSON.stringify(body) });
+  const badCr = await crPatch({ responseStatus: 999, name: 'should-not-apply' });
+  const badCrBody = await badCr.json();
+  check(badCr.status === 400 && badCrBody.error === 'bad_response_status', `bad status not rejected (${badCr.status})`);
+  const crUnauth = await fetch(`${BASE}/api/inboxes/${free.inbox.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ responseStatus: 503 }),
+  });
+  check(crUnauth.status === 401, `custom response PATCH unauth expected 401, got ${crUnauth.status}`);
+  const crSet = await crPatch({
+    responseStatus: 503,
+    responseBody: '{"error":"simulated","id":"{{eventId}}","m":"{{method}}"}',
+    responseContentType: '',
+  }).then((r) => r.json());
+  check(crSet.inbox?.responseStatus === 503 && crSet.inbox?.name !== 'should-not-apply', 'responseStatus not saved / bad patch half-applied');
+  const cr503 = await fetch(`${BASE}/hook/${free.inbox.id}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ event: 'retry.test' }),
+  });
+  const cr503Text = await cr503.text();
+  const cr503Id = cr503.headers.get('x-hookkeep-event-id') || '';
+  check(cr503.status === 503, `custom status expected 503, got ${cr503.status}`);
+  check((cr503.headers.get('content-type') || '').includes('application/json'), 'auto content-type not json');
+  check(cr503Id.startsWith('ev_') && cr503Text.includes(cr503Id) && cr503Text.includes('"m":"POST"'),
+    `template not rendered: ${cr503Text}`);
+  const crList = await fetch(`${BASE}/api/inboxes/${free.inbox.id}/events?q=retry.test`, { headers: crHdr }).then((r) => r.json());
+  const crEv = crList.events.find((e) => e.id === cr503Id);
+  check(crEv && crEv.respondedStatus === 503 && crEv.respondedCustom === true, 'event did not record respondedStatus 503');
+  await crPatch({ responseStatus: 200, responseBody: '{{json.challenge}}', responseContentType: 'text/plain' });
+  const crChal = await fetch(`${BASE}/hook/${free.inbox.id}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'url_verification', challenge: 'chal_abc123' }),
+  });
+  const crChalText = await crChal.text();
+  check(crChal.status === 200 && crChalText === 'chal_abc123', `challenge echo failed: ${crChal.status} ${crChalText}`);
+  check((crChal.headers.get('content-type') || '').startsWith('text/plain'), 'explicit content-type not honored');
+  await crPatch({ responseStatus: 204 });
+  const cr204 = await fetch(`${BASE}/hook/${free.inbox.id}`, { method: 'POST', body: 'x' });
+  check(cr204.status === 204 && (await cr204.text()) === '', `204 expected empty body (got ${cr204.status})`);
+  const crReset = await crPatch({ responseStatus: 0 }).then((r) => r.json());
+  check(crReset.inbox?.responseStatus === 0, 'reset to default failed');
+  const crDefault = await fetch(`${BASE}/hook/${free.inbox.id}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{"back":"default"}',
+  });
+  const crDefaultJson = await crDefault.json();
+  check(crDefault.status === 200 && crDefaultJson.ok === true && crDefaultJson.received === true, 'default ack not restored');
+  console.log('custom response: 400 bad / 401 unauth / 503 templated / challenge echo / 204 empty / default ack restored');
 
   step('waitlist');
   const wait = await fetch(`${BASE}/api/waitlist`, {

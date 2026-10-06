@@ -172,7 +172,15 @@ app.patch('/api/inboxes/:id', async (c) => {
   const ws = requireWs(c);
   if (!ws) return c.json({ error: 'unauthorized' }, 401);
   const body = await c.req.json().catch(() => ({}));
-  const inbox = db.updateInbox(ws, c.req.param('id'), body);
+  let inbox;
+  try {
+    inbox = db.updateInbox(ws, c.req.param('id'), body);
+  } catch (e) {
+    if (e.code === 'bad_response_status') {
+      return c.json({ error: e.code, message: e.message }, 400);
+    }
+    throw e;
+  }
   if (!inbox) return c.json({ error: 'not_found' }, 404);
   return c.json({ inbox: { ...inbox, webhookUrl: `${baseUrl(c)}/hook/${inbox.id}` } });
 });
@@ -414,6 +422,14 @@ async function ingest(c) {
       };
       if (af.error) resp.autoForward.error = af.error;
     }
+  }
+  // Custom ingest response (inbox.responseStatus/Body/ContentType): send exactly what the
+  // operator configured instead of the JSON ack — e.g. 503 to test provider retries.
+  if (result.customResponse) {
+    const cr = result.customResponse;
+    const h = { 'x-hookkeep-event-id': result.eventId };
+    if (cr.contentType) h['content-type'] = cr.contentType;
+    return c.body(cr.body, cr.status, h);
   }
   return c.json(resp, 200);
 }

@@ -73,7 +73,13 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
 - `POST /api/workspace` → create workspace + first inbox + owner token
 - `POST /hook/:inboxId` → **public ingest** (any method)
 - `GET /api/workspace` + header `x-hookkeep-token`
-- `PATCH /api/inboxes/:id` `{ name?, forwardUrl?, autoForward?, alertKeyword?, alertEmail?, notifyWebhookUrl? }`
+- `PATCH /api/inboxes/:id` `{ name?, forwardUrl?, autoForward?, alertKeyword?, alertEmail?, notifyWebhookUrl?, responseStatus?, responseBody?, responseContentType? }`
+- **Custom ingest response** — set `responseStatus` (200–599; `0`/`null` = default JSON ack), optional `responseBody` (≤10k chars,
+  placeholders `{{eventId}}` `{{method}}` `{{receivedAt}}` `{{json.some.path}}`) and `responseContentType` (auto JSON/text when blank).
+  `/hook/:inboxId` then answers exactly that (204/205/304 send no body) plus header `x-hookkeep-event-id`. Use it to make the
+  sender see a 503 and exercise its retry/backoff, or echo a handshake (Slack `url_verification`: status 200, body `{{json.challenge}}`,
+  `text/plain`). Capture still happens; each event records `respondedStatus` / `respondedCustom`. Bad status → 400 `bad_response_status`
+  (patch not applied). Free tier OK. Dashboard: sidebar **Custom response** panel with *Default ack / 503 retry test / Echo challenge* presets.
 - `GET /api/inboxes/:id/events?q=&method=&statusMin=` (text / HTTP method / status ≥ N)
 - `GET /api/inboxes/:id/events/export?format=json|csv&q=&method=&statusMin=&limit=` → bulk download of the **current filtered** set (same filters/cap as list; free tier OK)
 - `POST /api/inboxes/:id/events/replay-bulk` `{ targetUrl?, q?, method?, statusMin?, limit? }` → serially replay the **current filtered** set via the same forward path (default/hard max 50; free tier OK). Target = `targetUrl` else inbox `forwardUrl`; neither → 400 `no_forward_url`.

@@ -13,6 +13,9 @@
  *   code:<CODE>               -> unlock code entry { tier, usedBy, note }
  */
 
+// Shared with the Node server (pure ESM, zero deps — wrangler bundles it).
+import { normalizeResponsePatch, publicResponseConfig, buildCustomResponse } from '../../src/custom-response.js';
+
 const TIERS = {
   free: { name: 'Free', maxInboxes: 1, maxEventsKeep: 50, maxEventsMonth: 500, alerts: false },
   paid: { name: 'Pro', maxInboxes: 5, maxEventsKeep: 5000, maxEventsMonth: 5000, alerts: true },
@@ -77,6 +80,7 @@ function publicInbox(inbox) {
     alertKeyword: inbox.alertKeyword || '',
     alertEmail: inbox.alertEmail || '',
     notifyWebhookUrl: inbox.notifyWebhookUrl || '',
+    ...publicResponseConfig(inbox),
     eventCount: inbox.eventCount || 0,
     createdAt: inbox.createdAt,
   };
@@ -91,6 +95,8 @@ function summarizeEvent(e) {
     statusGuess: e.statusGuess,
     preview: (e.bodyText || '').slice(0, 160),
     contentType: e.contentType,
+    respondedStatus: e.respondedStatus ?? 200,
+    respondedCustom: Boolean(e.respondedCustom),
   };
 }
 
@@ -110,6 +116,7 @@ function toExportEvent(e) {
     bodyTruncated: truncated || undefined,
     size: e.size,
   };
+  if (e.respondedStatus != null) out.respondedStatus = e.respondedStatus;
   if (e.path) out.path = e.path;
   if (e.url) out.url = e.url;
   if (e.autoForward && typeof e.autoForward === 'object') {
@@ -525,6 +532,11 @@ export default {
           size: new TextEncoder().encode(bodyText || '').length,
         };
 
+        // Per-inbox custom ingest response (status/body/content-type) — free tier OK
+        const customResponse = buildCustomResponse(inbox, event);
+        event.respondedStatus = customResponse ? customResponse.status : 200;
+        event.respondedCustom = Boolean(customResponse);
+
         inbox.eventCount = (inbox.eventCount || 0) + 1;
         ws.eventsThisMonth = (ws.eventsThisMonth || 0) + 1;
 
@@ -601,6 +613,11 @@ export default {
         if (autoForwardTarget) {
           resp.autoForward = { attempted: true, queued: true, target: autoForwardTarget };
         }
+        if (customResponse) {
+          const h = { 'access-control-allow-origin': '*', 'x-hookkeep-event-id': eventId };
+          if (customResponse.contentType) h['content-type'] = customResponse.contentType;
+          return new Response(customResponse.body, { status: customResponse.status, headers: h });
+        }
         return json(resp, 200);
       }
 
@@ -676,6 +693,9 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           alertKeyword: '',
           alertEmail: ws.email || '',
           notifyWebhookUrl: '',
+          responseStatus: 0,
+          responseBody: '',
+          responseContentType: '',
           createdAt: new Date().toISOString(),
           eventCount: 0,
         };
@@ -729,6 +749,9 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           alertKeyword: '',
           alertEmail: ws.email || '',
           notifyWebhookUrl: '',
+          responseStatus: 0,
+          responseBody: '',
+          responseContentType: '',
           createdAt: new Date().toISOString(),
           eventCount: 0,
         };
@@ -748,6 +771,9 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
         const body = await bodyJson();
         const inbox = await getInbox(kv, inboxMatch[1]);
         if (!inbox || inbox.workspaceId !== ws.id) return json({ error: 'not_found' }, 404);
+        const rp = normalizeResponsePatch(body);
+        if (!rp.ok) return json({ error: rp.error, message: rp.message }, 400);
+        Object.assign(inbox, rp.patch);
         if (body.name != null) inbox.name = String(body.name).slice(0, 80);
         if (body.forwardUrl != null) inbox.forwardUrl = String(body.forwardUrl).slice(0, 500);
         if (body.autoForward != null) inbox.autoForward = Boolean(body.autoForward);

@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { customAlphabet } from 'nanoid';
+import { normalizeResponsePatch, publicResponseConfig, buildCustomResponse } from './custom-response.js';
 
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 12);
 const id16 = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 16);
@@ -88,6 +89,9 @@ function makeInbox(db, ws, { name = 'Inbox' } = {}) {
     alertKeyword: '',
     alertEmail: ws.email || '',
     notifyWebhookUrl: '',
+    responseStatus: 0,
+    responseBody: '',
+    responseContentType: '',
     createdAt: new Date().toISOString(),
     eventCount: 0,
   };
@@ -168,6 +172,14 @@ export function updateInbox(ws, inboxId, patch) {
   const db = read();
   const inbox = db.inboxes[inboxId];
   if (!inbox || inbox.workspaceId !== ws.id) return null;
+  // Validate custom ingest response first so a bad status never half-applies the patch
+  const rp = normalizeResponsePatch(patch);
+  if (!rp.ok) {
+    const err = new Error(rp.message);
+    err.code = rp.error;
+    throw err;
+  }
+  Object.assign(inbox, rp.patch);
   if (patch.name != null) inbox.name = String(patch.name).slice(0, 80);
   if (patch.forwardUrl != null) inbox.forwardUrl = String(patch.forwardUrl).slice(0, 500);
   if (patch.autoForward != null) inbox.autoForward = Boolean(patch.autoForward);
@@ -220,6 +232,11 @@ export function ingestEvent(inboxId, { method, headers, bodyText, contentType })
     size: Buffer.byteLength(bodyText || '', 'utf8'),
   };
 
+  // Per-inbox custom ingest response (status/body/content-type) — free tier OK
+  const customResponse = buildCustomResponse(inbox, event);
+  event.respondedStatus = customResponse ? customResponse.status : 200;
+  event.respondedCustom = Boolean(customResponse);
+
   db.events[eventId] = event;
   inbox.eventCount = (inbox.eventCount || 0) + 1;
   ws.eventsThisMonth = (ws.eventsThisMonth || 0) + 1;
@@ -261,6 +278,7 @@ export function ingestEvent(inboxId, { method, headers, bodyText, contentType })
     alert,
     overMonth: ws.eventsThisMonth > limits.maxEventsMonth,
     autoForwardTarget,
+    customResponse,
   };
 }
 
@@ -470,6 +488,7 @@ export function toExportEvent(e) {
     bodyTruncated: truncated || undefined,
     size: e.size,
   };
+  if (e.respondedStatus != null) out.respondedStatus = e.respondedStatus;
   if (e.path) out.path = e.path;
   if (e.url) out.url = e.url;
   if (e.autoForward && typeof e.autoForward === 'object') {
@@ -825,6 +844,7 @@ function publicInbox(inbox) {
     alertKeyword: inbox.alertKeyword || '',
     alertEmail: inbox.alertEmail || '',
     notifyWebhookUrl: inbox.notifyWebhookUrl || '',
+    ...publicResponseConfig(inbox),
     eventCount: inbox.eventCount || 0,
     createdAt: inbox.createdAt,
   };
@@ -840,6 +860,8 @@ function summarizeEvent(e) {
     statusGuess: e.statusGuess,
     preview: (e.bodyText || '').slice(0, 160),
     contentType: e.contentType,
+    respondedStatus: e.respondedStatus ?? 200,
+    respondedCustom: Boolean(e.respondedCustom),
   };
 }
 

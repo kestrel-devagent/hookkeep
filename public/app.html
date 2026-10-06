@@ -70,6 +70,21 @@
         <label class="muted" style="font-size:0.8rem">Alert email (optional mailto fallback)</label>
         <input id="alert-email" type="email" placeholder="you@company.com" style="width:100%;margin:0.35rem 0" />
         <p id="alert-hint" class="muted" style="font-size:0.75rem;margin:0.25rem 0"></p>
+        <details id="custom-response-panel" style="margin:0.5rem 0">
+          <summary class="muted" style="cursor:pointer;font-size:0.8rem">Custom response <span id="custom-response-badge" class="muted"></span></summary>
+          <p class="fine" style="font-size:0.72rem;margin:0.35rem 0">What the webhook URL answers the sender. Return 500/503 to test the provider's retries, or echo a handshake. Placeholders: <code>{{eventId}}</code> <code>{{method}}</code> <code>{{json.challenge}}</code>. Status 0 = default JSON ack.</p>
+          <div style="display:flex;gap:0.35rem;flex-wrap:wrap;margin:0.35rem 0">
+            <button class="btn btn-sm" type="button" data-resp-preset="default">Default ack</button>
+            <button class="btn btn-sm" type="button" data-resp-preset="503">503 retry test</button>
+            <button class="btn btn-sm" type="button" data-resp-preset="challenge">Echo challenge</button>
+          </div>
+          <label class="muted" style="font-size:0.8rem">Status (200–599, 0 = default)</label>
+          <input id="resp-status" type="number" min="0" max="599" placeholder="0" style="width:100%;margin:0.35rem 0" />
+          <label class="muted" style="font-size:0.8rem">Content-Type (optional)</label>
+          <input id="resp-ct" type="text" placeholder="auto: application/json or text/plain" style="width:100%;margin:0.35rem 0" />
+          <label class="muted" style="font-size:0.8rem">Body</label>
+          <textarea id="resp-body" rows="3" placeholder='{"ok":true,"id":"{{eventId}}"}' style="width:100%;margin:0.35rem 0;font-family:monospace;font-size:0.8rem"></textarea>
+        </details>
         <button class="btn btn-sm" id="btn-save-inbox" style="width:100%;margin-top:0.35rem;justify-content:center">Save inbox</button>
         <p class="fine" style="font-size:0.75rem;margin-top:0.75rem">Data persists while the host keeps <code>HOOKKEEP_DATA</code> mounted — see DEPLOY.md.</p>
       </aside>
@@ -198,6 +213,7 @@ const ERRORS = {
   code_used: 'That unlock code was already used on another workspace.',
   not_found: 'Not found.',
   confirm_required: 'Confirm required before bulk delete.',
+  bad_response_status: 'Custom response status must be 200–599 (or 0 for the default ack).',
 };
 function humanError(e) {
   const code = e?.data?.error || e?.message || '';
@@ -284,6 +300,12 @@ function render() {
     $('alert-kw').value = active.alertKeyword || '';
     $('notify-url').value = active.notifyWebhookUrl || '';
     $('alert-email').value = active.alertEmail || '';
+    if ($('resp-status')) {
+      $('resp-status').value = active.responseStatus ? String(active.responseStatus) : '';
+      $('resp-ct').value = active.responseContentType || '';
+      $('resp-body').value = active.responseBody || '';
+      $('custom-response-badge').textContent = active.responseStatus ? `· HTTP ${active.responseStatus}` : '· default';
+    }
     $('empty-curl').textContent =
       `curl -X POST ${active.webhookUrl} \\\n  -H 'content-type: application/json' \\\n  -d '{"hello":"hookkeep","status":"ok"}'`;
     // Warn when the configured public URL host doesn't match this page's host
@@ -322,7 +344,7 @@ async function loadEvents() {
   tbody.innerHTML = data.events.map((e) => `
     <tr data-id="${e.id}">
       <td>${new Date(e.receivedAt).toLocaleString()}</td>
-      <td><code>${e.method}</code></td>
+      <td><code>${e.method}</code>${e.respondedCustom ? ` <span class="muted" title="Hookkeep answered with your custom response">↩ ${escapeHtml(String(e.respondedStatus))}</span>` : ''}</td>
       <td>${e.statusGuess ? `<code>${escapeHtml(e.statusGuess)}</code>` : '—'}</td>
       <td class="muted">${escapeHtml(e.preview || '')}</td>
     </tr>`).join('');
@@ -397,6 +419,9 @@ async function openEvent(id) {
   $('ev-curl').textContent = buildCurlSnippet(data.event);
   $('curl-panel').open = false;
   $('replay-msg').hidden = true;
+  const titleBits = [`${data.event.method} · ${data.event.id}`];
+  if (data.event.respondedCustom) titleBits.push(`answered HTTP ${data.event.respondedStatus} (custom response)`);
+  $('ev-title').textContent = titleBits.join(' · ');
   const afEl = $('auto-forward-status');
   if (afEl) {
     const af = data.event.autoForward;
@@ -636,6 +661,22 @@ async function deleteFilteredEvents() {
 }
 if ($('btn-delete-filtered')) $('btn-delete-filtered').onclick = () => deleteFilteredEvents();
 
+const RESPONSE_PRESETS = {
+  default: { status: '', ct: '', body: '' },
+  '503': { status: '503', ct: 'application/json', body: '{"error":"hookkeep simulated outage","id":"{{eventId}}"}' },
+  challenge: { status: '200', ct: 'text/plain', body: '{{json.challenge}}' },
+};
+document.querySelectorAll('[data-resp-preset]').forEach((b) => {
+  b.onclick = () => {
+    const p = RESPONSE_PRESETS[b.dataset.respPreset];
+    if (!p) return;
+    $('resp-status').value = p.status;
+    $('resp-ct').value = p.ct;
+    $('resp-body').value = p.body;
+    toast('Preset loaded — click Save inbox to apply.');
+  };
+});
+
 $('btn-save-inbox').onclick = async () => {
   try {
     await api(`/api/inboxes/${state.activeInboxId}`, {
@@ -646,6 +687,13 @@ $('btn-save-inbox').onclick = async () => {
         alertKeyword: $('alert-kw').value,
         notifyWebhookUrl: $('notify-url').value,
         alertEmail: $('alert-email').value,
+        ...($('resp-status')
+          ? {
+              responseStatus: Number($('resp-status').value || 0),
+              responseContentType: $('resp-ct').value,
+              responseBody: $('resp-body').value,
+            }
+          : {}),
       }),
     });
     await loadWorkspace();

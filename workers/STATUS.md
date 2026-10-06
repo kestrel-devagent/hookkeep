@@ -1,7 +1,7 @@
 # Workers port — STATUS
 
 **Author:** Devin SWE-2 medium (+ orchestrator finish)
-**Updated:** 2026-10-05
+**Updated:** 2026-10-06
 
 ## What works (code complete; deploy needs CF account)
 
@@ -34,10 +34,12 @@ Canonical live demo remains the Node + trycloudflare tunnel.
 | Bulk events export JSON/CSV | Node `/events/export` | Workers same route (parity 2026-09-25) |
 | Bulk replay filtered | Node `/events/replay-bulk` | Workers same route (parity 2026-10-02) |
 | Bulk delete filtered | Node `/events/delete-bulk` | Workers same route — KV delete + `eventCount` decrement (parity 2026-10-05) |
+| Custom ingest response | Node `/hook/:inboxId` honors inbox `responseStatus`/`responseBody`/`responseContentType` | Workers same — shared `src/custom-response.js` (bundled by wrangler); unit drives `worker.fetch` with a KV mock (parity 2026-10-06) |
 | Local smoke | `npm test` | needs `wrangler dev` |
 
 ## Done recently
 
+- 2026-10-06: custom ingest response — inbox `responseStatus` (200–599, 0 = default ack) + `responseBody` (templated `{{eventId}}`/`{{method}}`/`{{receivedAt}}`/`{{json.path}}`) + `responseContentType`; `/hook/:inboxId` answers with it (204/205/304 bodiless) + `x-hookkeep-event-id`; events record `respondedStatus`/`respondedCustom`; bad status → 400 `bad_response_status`; dashboard **Custom response** panel with presets; unit `custom-response-unit.js` (helper + Workers fetch path).
 - 2026-10-05: bulk delete of filtered events — `POST /api/inboxes/:id/events/delete-bulk` (same filters; hard max 50; requires `confirm: true` else 400 `confirm_required`; decrements inbox `eventCount`, floor 0); dashboard **Delete filtered** with confirm dialog; unit `workers-delete-bulk-unit.js`.
 - 2026-10-02: bulk replay of filtered events — `POST /api/inboxes/:id/events/replay-bulk` (same filters; hard max 50; serial via existing forward path); dashboard **Replay filtered**; unit `workers-replay-bulk-unit.js`.
 - 2026-09-25: bulk filtered events export — `GET /api/inboxes/:id/events/export?format=json|csv` (same q/method/statusMin + list cap); dashboard Export JSON/CSV; unit `workers-export-unit.js`.
