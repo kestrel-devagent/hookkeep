@@ -80,8 +80,17 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
   sender see a 503 and exercise its retry/backoff, or echo a handshake (Slack `url_verification`: status 200, body `{{json.challenge}}`,
   `text/plain`). Capture still happens; each event records `respondedStatus` / `respondedCustom`. Bad status → 400 `bad_response_status`
   (patch not applied). Free tier OK. Dashboard: sidebar **Custom response** panel with *Default ack / 503 retry test / Echo challenge* presets.
-- `GET /api/inboxes/:id/events?q=&method=&statusMin=` (text / HTTP method / status ≥ N)
-- `GET /api/inboxes/:id/events/export?format=json|csv&q=&method=&statusMin=&limit=` → bulk download of the **current filtered** set (same filters/cap as list; free tier OK)
+- **Signature check** — `PATCH /api/inboxes/:id` `{ signingScheme: none|stripe|github|hmac-sha256, signingSecret?, signingHeader? }`.
+  Every capture on `/hook/:inboxId` is verified against the **raw body bytes as received** and the event records
+  `signature: { scheme, valid, reason, header, timestampSkewSec? }` — reasons `ok` · `missing_header` · `bad_format` · `mismatch` ·
+  `timestamp_out_of_tolerance` · `no_secret`. Stripe: `stripe-signature: t=…,v1=…` (multiple `v1` OK), HMAC-SHA256 of `${t}.${rawBody}`,
+  300s tolerance. GitHub: `x-hub-signature-256: sha256=<hex>`. Generic `hmac-sha256`: header `signingHeader` (default `x-signature`)
+  with `<hex>` or `sha256=<hex>`. Constant-time compare via WebCrypto (shared `src/signature.js`, Node + Workers). The secret is
+  **write-only** — APIs return only `hasSigningSecret` + `signingSecretHint` (`••••` + last 4); `signingSecret: ""` clears it.
+  Capture is always stored and the ingest response is unchanged (custom response still applies). Bad scheme → 400 `bad_signing_scheme`
+  (patch not applied). Free tier OK. Dashboard: sidebar **Signature check** panel; event rows show `✓ sig` / `✗ sig`; detail shows the reason.
+- `GET /api/inboxes/:id/events?q=&method=&statusMin=&sig=` (text / HTTP method / status ≥ N / signature `valid|invalid|unchecked`)
+- `GET /api/inboxes/:id/events/export?format=json|csv&q=&method=&statusMin=&sig=&limit=` → bulk download of the **current filtered** set (same filters/cap as list; free tier OK; JSON rows carry `signature`, CSV adds `signatureValid,signatureReason`)
 - `POST /api/inboxes/:id/events/replay-bulk` `{ targetUrl?, q?, method?, statusMin?, limit? }` → serially replay the **current filtered** set via the same forward path (default/hard max 50; free tier OK). Target = `targetUrl` else inbox `forwardUrl`; neither → 400 `no_forward_url`.
 - `POST /api/inboxes/:id/events/delete-bulk` `{ q?, method?, statusMin?, limit?, confirm: true }` → delete the **current filtered** set (same filters; default/hard max 50; free tier OK). Missing `confirm: true` → 400 `confirm_required`. Returns `{ ok, inboxId, filters, deleted, ids }`; inbox `eventCount` decremented.
 - `GET /api/inboxes/:id/alerts?limit=20` → recent Pro alert records

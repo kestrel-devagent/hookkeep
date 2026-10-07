@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { customAlphabet } from 'nanoid';
 import { normalizeResponsePatch, publicResponseConfig, buildCustomResponse } from './custom-response.js';
+import { normalizeSignaturePatch, publicSignatureConfig } from './signature.js';
 
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 12);
 const id16 = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 16);
@@ -92,6 +93,9 @@ function makeInbox(db, ws, { name = 'Inbox' } = {}) {
     responseStatus: 0,
     responseBody: '',
     responseContentType: '',
+    signingScheme: 'none',
+    signingSecret: '',
+    signingHeader: '',
     createdAt: new Date().toISOString(),
     eventCount: 0,
   };
@@ -179,7 +183,15 @@ export function updateInbox(ws, inboxId, patch) {
     err.code = rp.error;
     throw err;
   }
+  // Same for signature verification fields (bad scheme → 400 bad_signing_scheme, nothing applied)
+  const sp = normalizeSignaturePatch(patch);
+  if (!sp.ok) {
+    const err = new Error(sp.message);
+    err.code = sp.error;
+    throw err;
+  }
   Object.assign(inbox, rp.patch);
+  Object.assign(inbox, sp.patch);
   if (patch.name != null) inbox.name = String(patch.name).slice(0, 80);
   if (patch.forwardUrl != null) inbox.forwardUrl = String(patch.forwardUrl).slice(0, 500);
   if (patch.autoForward != null) inbox.autoForward = Boolean(patch.autoForward);
@@ -196,7 +208,7 @@ export function getInbox(inboxId) {
   return db.inboxes[inboxId] || null;
 }
 
-export function ingestEvent(inboxId, { method, headers, bodyText, contentType }) {
+export function ingestEvent(inboxId, { method, headers, bodyText, contentType, signature = null, size = null }) {
   const db = read();
   const inbox = db.inboxes[inboxId];
   if (!inbox) return { ok: false, error: 'not_found' };
@@ -229,8 +241,10 @@ export function ingestEvent(inboxId, { method, headers, bodyText, contentType })
     contentType: contentType || '',
     statusGuess: statusGuess != null ? String(statusGuess).slice(0, 80) : null,
     receivedAt,
-    size: Buffer.byteLength(bodyText || '', 'utf8'),
+    size: size != null ? size : Buffer.byteLength(bodyText || '', 'utf8'),
   };
+  // Signature check result (computed by the caller over the raw body bytes; capture is stored regardless)
+  if (signature) event.signature = signature;
 
   // Per-inbox custom ingest response (status/body/content-type) — free tier OK
   const customResponse = buildCustomResponse(inbox, event);
@@ -435,7 +449,7 @@ const BODY_EXPORT_MAX = 8192;
 const BODY_CSV_PREVIEW = 200;
 
 /** Shared filter + keep-cap for listEvents / exportEvents (same semantics). */
-function queryInboxEvents(ws, inboxId, { q = '', method = '', statusMin = null, limit = 50 } = {}) {
+function queryInboxEvents(ws, inboxId, { q = '', method = '', statusMin = null, limit = 50, sig = '' } = {}) {
   const db = read();
   const inbox = db.inboxes[inboxId];
   if (!inbox || inbox.workspaceId !== ws.id) return null;
@@ -464,8 +478,19 @@ function queryInboxEvents(ws, inboxId, { q = '', method = '', statusMin = null, 
       return !Number.isNaN(n) && n >= min;
     });
   }
+  if (sig) rows = rows.filter((e) => signatureFilterMatch(e, sig));
   const cap = Math.min(Number(limit) || 50, limits.maxEventsKeep);
   return { rows: rows.slice(0, cap), inbox, limits, cap };
+}
+
+/** sig filter: valid | invalid | unchecked (anything else = no filter). */
+export function signatureFilterMatch(e, sig) {
+  const f = String(sig || '').toLowerCase();
+  const s = e && e.signature;
+  if (f === 'valid') return Boolean(s && s.valid === true);
+  if (f === 'invalid') return Boolean(s && s.valid === false);
+  if (f === 'unchecked') return !s;
+  return true;
 }
 
 export function listEvents(ws, inboxId, opts = {}) {
@@ -489,6 +514,7 @@ export function toExportEvent(e) {
     size: e.size,
   };
   if (e.respondedStatus != null) out.respondedStatus = e.respondedStatus;
+  if (e.signature && typeof e.signature === 'object') out.signature = e.signature;
   if (e.path) out.path = e.path;
   if (e.url) out.url = e.url;
   if (e.autoForward && typeof e.autoForward === 'object') {
@@ -510,7 +536,17 @@ export function escapeCsvField(val) {
 }
 
 export function eventsToCsv(events) {
-  const header = ['id', 'receivedAt', 'method', 'status', 'contentType', 'bodyPreview', 'autoForwardOk'];
+  const header = [
+    'id',
+    'receivedAt',
+    'method',
+    'status',
+    'contentType',
+    'bodyPreview',
+    'autoForwardOk',
+    'signatureValid',
+    'signatureReason',
+  ];
   const lines = [header.join(',')];
   for (const e of events) {
     const body = String(e.bodyText || '');
@@ -521,6 +557,7 @@ export function eventsToCsv(events) {
           ? 'true'
           : 'false'
         : '';
+    const sg = e.signature && typeof e.signature === 'object' ? e.signature : null;
     lines.push(
       [
         escapeCsvField(e.id),
@@ -530,6 +567,8 @@ export function eventsToCsv(events) {
         escapeCsvField(e.contentType || ''),
         escapeCsvField(preview),
         escapeCsvField(af),
+        escapeCsvField(sg ? (sg.valid ? 'true' : 'false') : ''),
+        escapeCsvField(sg ? sg.reason || '' : ''),
       ].join(',')
     );
   }
@@ -845,6 +884,7 @@ function publicInbox(inbox) {
     alertEmail: inbox.alertEmail || '',
     notifyWebhookUrl: inbox.notifyWebhookUrl || '',
     ...publicResponseConfig(inbox),
+    ...publicSignatureConfig(inbox),
     eventCount: inbox.eventCount || 0,
     createdAt: inbox.createdAt,
   };
@@ -862,6 +902,7 @@ function summarizeEvent(e) {
     contentType: e.contentType,
     respondedStatus: e.respondedStatus ?? 200,
     respondedCustom: Boolean(e.respondedCustom),
+    signature: e.signature || null,
   };
 }
 

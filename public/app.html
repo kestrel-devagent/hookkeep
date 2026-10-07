@@ -85,6 +85,27 @@
           <label class="muted" style="font-size:0.8rem">Body</label>
           <textarea id="resp-body" rows="3" placeholder='{"ok":true,"id":"{{eventId}}"}' style="width:100%;margin:0.35rem 0;font-family:monospace;font-size:0.8rem"></textarea>
         </details>
+        <details id="signature-panel" style="margin:0.5rem 0">
+          <summary class="muted" style="cursor:pointer;font-size:0.8rem">Signature check <span id="signature-badge" class="muted"></span></summary>
+          <p class="fine" style="font-size:0.72rem;margin:0.35rem 0">Verify each delivery's HMAC over the raw body. Every capture is still stored and the response is unchanged — events just get a <code>✓ sig</code> / <code>✗ sig</code> badge with the reason.</p>
+          <label class="muted" style="font-size:0.8rem">Scheme</label>
+          <select id="sig-scheme" style="width:100%;margin:0.35rem 0">
+            <option value="none">Off</option>
+            <option value="stripe">Stripe (stripe-signature, 300s tolerance)</option>
+            <option value="github">GitHub (x-hub-signature-256)</option>
+            <option value="hmac-sha256">Generic HMAC-SHA256 (custom header)</option>
+          </select>
+          <label class="muted" style="font-size:0.8rem">Signing secret (write-only)</label>
+          <input id="sig-secret" type="password" autocomplete="new-password" placeholder="whsec_… / repo webhook secret" style="width:100%;margin:0.35rem 0" />
+          <label class="muted" style="font-size:0.75rem;display:flex;align-items:center;gap:0.4rem;margin:0.2rem 0">
+            <input id="sig-clear" type="checkbox" /> Clear stored secret on save
+          </label>
+          <div id="sig-header-row">
+            <label class="muted" style="font-size:0.8rem">Signature header (hex or sha256=hex)</label>
+            <input id="sig-header" type="text" placeholder="x-signature" style="width:100%;margin:0.35rem 0" />
+          </div>
+          <p id="sig-hint" class="muted" style="font-size:0.72rem;margin:0.25rem 0"></p>
+        </details>
         <button class="btn btn-sm" id="btn-save-inbox" style="width:100%;margin-top:0.35rem;justify-content:center">Save inbox</button>
         <p class="fine" style="font-size:0.75rem;margin-top:0.75rem">Data persists while the host keeps <code>HOOKKEEP_DATA</code> mounted — see DEPLOY.md.</p>
       </aside>
@@ -105,6 +126,7 @@
           </details>
           <p id="replay-msg" class="msg" hidden></p>
           <p id="auto-forward-status" class="muted" style="font-size:0.85rem;margin:0.5rem 0" hidden></p>
+          <p id="signature-status" class="muted" style="font-size:0.85rem;margin:0.5rem 0" hidden></p>
           <h4 class="muted">Headers</h4>
           <pre id="ev-headers"></pre>
           <h4 class="muted">Body</h4>
@@ -306,6 +328,21 @@ function render() {
       $('resp-body').value = active.responseBody || '';
       $('custom-response-badge').textContent = active.responseStatus ? `· HTTP ${active.responseStatus}` : '· default';
     }
+    if ($('sig-scheme')) {
+      const scheme = active.signingScheme || 'none';
+      $('sig-scheme').value = scheme;
+      $('sig-secret').value = '';
+      $('sig-clear').checked = false;
+      $('sig-secret').placeholder = active.hasSigningSecret
+        ? `saved ${active.signingSecretHint || '••••'} — type to replace`
+        : 'whsec_… / repo webhook secret';
+      $('sig-header').value = scheme === 'hmac-sha256' ? active.signingHeader || '' : '';
+      $('sig-header-row').classList.toggle('hidden', scheme !== 'hmac-sha256');
+      $('signature-badge').textContent =
+        scheme === 'none' ? '· off' : `· ${scheme}${active.hasSigningSecret ? '' : ' (no secret)'}`;
+      $('sig-hint').textContent =
+        scheme !== 'none' && !active.hasSigningSecret ? 'No secret saved yet — events will show ✗ sig (no_secret).' : '';
+    }
     $('empty-curl').textContent =
       `curl -X POST ${active.webhookUrl} \\\n  -H 'content-type: application/json' \\\n  -d '{"hello":"hookkeep","status":"ok"}'`;
     // Warn when the configured public URL host doesn't match this page's host
@@ -344,7 +381,7 @@ async function loadEvents() {
   tbody.innerHTML = data.events.map((e) => `
     <tr data-id="${e.id}">
       <td>${new Date(e.receivedAt).toLocaleString()}</td>
-      <td><code>${e.method}</code>${e.respondedCustom ? ` <span class="muted" title="Hookkeep answered with your custom response">↩ ${escapeHtml(String(e.respondedStatus))}</span>` : ''}</td>
+      <td><code>${e.method}</code>${e.respondedCustom ? ` <span class="muted" title="Hookkeep answered with your custom response">↩ ${escapeHtml(String(e.respondedStatus))}</span>` : ''}${e.signature ? ` <span title="${escapeHtml(`${e.signature.scheme}: ${e.signature.reason}`)}" style="color:${e.signature.valid ? 'var(--ok, #3d9a5f)' : 'var(--danger)'}">${e.signature.valid ? '✓ sig' : '✗ sig'}</span>` : ''}</td>
       <td>${e.statusGuess ? `<code>${escapeHtml(e.statusGuess)}</code>` : '—'}</td>
       <td class="muted">${escapeHtml(e.preview || '')}</td>
     </tr>`).join('');
@@ -422,6 +459,24 @@ async function openEvent(id) {
   const titleBits = [`${data.event.method} · ${data.event.id}`];
   if (data.event.respondedCustom) titleBits.push(`answered HTTP ${data.event.respondedStatus} (custom response)`);
   $('ev-title').textContent = titleBits.join(' · ');
+  const sigEl = $('signature-status');
+  if (sigEl) {
+    const sg = data.event.signature;
+    if (sg) {
+      sigEl.hidden = false;
+      sigEl.textContent = [
+        sg.valid ? '✓ Signature valid' : '✗ Signature invalid',
+        sg.scheme,
+        `reason: ${sg.reason}`,
+        sg.header ? `header: ${sg.header}` : null,
+        sg.timestampSkewSec != null ? `timestamp skew ${sg.timestampSkewSec}s` : null,
+      ].filter(Boolean).join(' · ');
+      sigEl.style.color = sg.valid ? 'var(--ok, #3d9a5f)' : 'var(--danger)';
+    } else {
+      sigEl.hidden = true;
+      sigEl.textContent = '';
+    }
+  }
   const afEl = $('auto-forward-status');
   if (afEl) {
     const af = data.event.autoForward;
@@ -677,6 +732,12 @@ document.querySelectorAll('[data-resp-preset]').forEach((b) => {
   };
 });
 
+if ($('sig-scheme')) {
+  $('sig-scheme').onchange = () => {
+    $('sig-header-row').classList.toggle('hidden', $('sig-scheme').value !== 'hmac-sha256');
+  };
+}
+
 $('btn-save-inbox').onclick = async () => {
   try {
     await api(`/api/inboxes/${state.activeInboxId}`, {
@@ -692,6 +753,18 @@ $('btn-save-inbox').onclick = async () => {
               responseStatus: Number($('resp-status').value || 0),
               responseContentType: $('resp-ct').value,
               responseBody: $('resp-body').value,
+            }
+          : {}),
+        ...($('sig-scheme')
+          ? {
+              signingScheme: $('sig-scheme').value,
+              ...($('sig-scheme').value === 'hmac-sha256' ? { signingHeader: $('sig-header').value } : {}),
+              // write-only: only send the secret when typed (or explicitly cleared)
+              ...($('sig-clear').checked
+                ? { signingSecret: '' }
+                : $('sig-secret').value
+                  ? { signingSecret: $('sig-secret').value }
+                  : {}),
             }
           : {}),
       }),

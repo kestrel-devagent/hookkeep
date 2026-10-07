@@ -1,7 +1,8 @@
 /** Local smoke test against a running server (default http://127.0.0.1:8787)
- * Steps: create → ingest → list → export → forwardUrl → replay → replay-bulk → delete-bulk → auto-forward → demo unlock → pro alerts → free tier → custom response
+ * Steps: create → ingest → list → export → forwardUrl → replay → replay-bulk → delete-bulk → auto-forward → demo unlock → pro alerts → free tier → custom response → signature check
  */
 import http from 'node:http';
+import { createHmac } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -158,7 +159,10 @@ async function main() {
   check((expCsvRes.headers.get('content-type') || '').includes('text/csv'), 'export csv content-type');
   const expCsv = await expCsvRes.text();
   const csvLines = expCsv.trim().split(/\r?\n/);
-  check(csvLines[0] === 'id,receivedAt,method,status,contentType,bodyPreview,autoForwardOk', 'csv header mismatch');
+  check(
+    csvLines[0] === 'id,receivedAt,method,status,contentType,bodyPreview,autoForwardOk,signatureValid,signatureReason',
+    'csv header mismatch'
+  );
   check(csvLines.length >= 3, `csv expected header+rows, got ${csvLines.length}`);
   check(expCsv.includes(ingest.id), 'csv missing payment event id');
   check(expCsv.includes(ingestGet.id), 'csv missing GET event id');
@@ -467,6 +471,67 @@ async function main() {
   const crDefaultJson = await crDefault.json();
   check(crDefault.status === 200 && crDefaultJson.ok === true && crDefaultJson.received === true, 'default ack not restored');
   console.log('custom response: 400 bad / 401 unauth / 503 templated / challenge echo / 204 empty / default ack restored');
+
+  step('signature check (stripe / github / hmac-sha256)');
+  const sgHdr = { 'x-hookkeep-token': free.ownerToken, 'content-type': 'application/json' };
+  const sgPatch = (body) =>
+    fetch(`${BASE}/api/inboxes/${free.inbox.id}`, { method: 'PATCH', headers: sgHdr, body: JSON.stringify(body) });
+  const sgBad = await sgPatch({ signingScheme: 'md5', name: 'should-not-apply' });
+  const sgBadBody = await sgBad.json();
+  check(sgBad.status === 400 && sgBadBody.error === 'bad_signing_scheme', `bad scheme not rejected (${sgBad.status})`);
+  const stripeSecret = 'whsec_smoke_' + Date.now().toString(36) + 'ZZ99';
+  const sgSet = await sgPatch({ signingScheme: 'stripe', signingSecret: stripeSecret }).then((r) => r.json());
+  check(sgSet.inbox?.signingScheme === 'stripe' && sgSet.inbox?.hasSigningSecret === true, 'stripe scheme not saved');
+  check(sgSet.inbox?.name !== 'should-not-apply', 'bad scheme patch half-applied');
+  check(sgSet.inbox?.signingSecretHint === '••••ZZ99', `hint wrong: ${sgSet.inbox?.signingSecretHint}`);
+  const sgWs = await fetch(`${BASE}/api/workspace`, { headers: sgHdr }).then((r) => r.text());
+  check(!sgWs.includes(stripeSecret) && !JSON.stringify(sgSet).includes(stripeSecret), 'signing secret leaked in API response');
+  // Raw body with odd whitespace + non-ASCII — must be verified byte-for-byte, not re-serialized
+  const sgBody = '{ "id":"evt_smoke",  "type":"invoice.paid", "note":"caf\u00e9 ✓" }';
+  const sgT = Math.floor(Date.now() / 1000);
+  const sgSig = createHmac('sha256', stripeSecret).update(`${sgT}.${sgBody}`).digest('hex');
+  const sgHook = (headers, body = sgBody) =>
+    fetch(`${BASE}/hook/${free.inbox.id}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body });
+  const sgOk = await sgHook({ 'stripe-signature': `t=${sgT},v1=${'0'.repeat(64)},v1=${sgSig}` });
+  const sgOkJson = await sgOk.json();
+  check(sgOk.status === 200 && sgOkJson.ok === true && sgOkJson.received === true, 'ingest ack changed by signature check');
+  const sgTamper = await sgHook({ 'stripe-signature': `t=${sgT},v1=${sgSig}` }, sgBody.replace('paid', 'void')).then((r) => r.json());
+  const oldT = sgT - 600;
+  const sgOld = await sgHook({
+    'stripe-signature': `t=${oldT},v1=${createHmac('sha256', stripeSecret).update(`${oldT}.${sgBody}`).digest('hex')}`,
+  }).then((r) => r.json());
+  const sgMissing = await sgHook({}).then((r) => r.json());
+  check(sgTamper.ok && sgOld.ok && sgMissing.ok, 'invalid-signature deliveries not captured');
+  const sgEv = async (id) =>
+    (await fetch(`${BASE}/api/events/${id}`, { headers: sgHdr }).then((r) => r.json())).event?.signature || {};
+  const s1 = await sgEv(sgOkJson.id);
+  check(s1.valid === true && s1.reason === 'ok' && s1.scheme === 'stripe' && typeof s1.timestampSkewSec === 'number', `stripe valid: ${JSON.stringify(s1)}`);
+  check((await sgEv(sgTamper.id)).reason === 'mismatch', 'tampered body not mismatch');
+  const s3 = await sgEv(sgOld.id);
+  check(s3.valid === false && s3.reason === 'timestamp_out_of_tolerance' && s3.timestampSkewSec >= 600, `expired: ${JSON.stringify(s3)}`);
+  check((await sgEv(sgMissing.id)).reason === 'missing_header', 'missing header not reported');
+  const sgInvalid = await fetch(`${BASE}/api/inboxes/${free.inbox.id}/events?sig=invalid&limit=50`, { headers: sgHdr }).then((r) => r.json());
+  check(sgInvalid.events.length >= 3 && sgInvalid.events.every((e) => e.signature && e.signature.valid === false), 'sig=invalid filter');
+  const sgCsv = await fetch(`${BASE}/api/inboxes/${free.inbox.id}/events/export?format=csv&sig=valid`, { headers: sgHdr }).then((r) => r.text());
+  check(sgCsv.trim().split('\n').slice(1).every((l) => l.endsWith(',true,ok')) && sgCsv.includes(sgOkJson.id), 'csv signature columns');
+  // GitHub
+  const ghSecret = 'gh-smoke-secret';
+  await sgPatch({ signingScheme: 'github', signingSecret: ghSecret });
+  const ghGood = await sgHook({ 'x-hub-signature-256': 'sha256=' + createHmac('sha256', ghSecret).update(sgBody).digest('hex') }).then((r) => r.json());
+  const ghBad = await sgHook({ 'x-hub-signature-256': 'sha256=' + createHmac('sha256', 'wrong').update(sgBody).digest('hex') }).then((r) => r.json());
+  check((await sgEv(ghGood.id)).valid === true && (await sgEv(ghBad.id)).reason === 'mismatch', 'github verify');
+  // Generic hmac-sha256 with custom header + custom response still applied
+  const hSecret = 'hmac-smoke-secret';
+  await sgPatch({ signingScheme: 'hmac-sha256', signingSecret: hSecret, signingHeader: 'X-Acme-Sig', responseStatus: 202, responseBody: 'q {{eventId}}' });
+  const hRes = await sgHook({ 'x-acme-sig': 'sha256=' + createHmac('sha256', hSecret).update(sgBody).digest('hex') });
+  const hText = await hRes.text();
+  const hId = hRes.headers.get('x-hookkeep-event-id') || '';
+  check(hRes.status === 202 && hText === `q ${hId}`, `custom response not preserved with signature check (${hRes.status} ${hText})`);
+  const hSig = await sgEv(hId);
+  check(hSig.valid === true && hSig.header === 'x-acme-sig', `hmac custom header: ${JSON.stringify(hSig)}`);
+  const sgClear = await sgPatch({ signingScheme: 'none', signingSecret: '', signingHeader: '', responseStatus: 0 }).then((r) => r.json());
+  check(sgClear.inbox?.signingScheme === 'none' && sgClear.inbox?.hasSigningSecret === false, 'clear signature config failed');
+  console.log('signature: 400 bad scheme / secret masked / stripe ok+multi-v1 / tampered / expired / missing / github ok+mismatch / hmac custom header / filter+csv / custom response intact');
 
   step('waitlist');
   const wait = await fetch(`${BASE}/api/waitlist`, {

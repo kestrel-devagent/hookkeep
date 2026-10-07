@@ -15,6 +15,7 @@
 
 // Shared with the Node server (pure ESM, zero deps — wrangler bundles it).
 import { normalizeResponsePatch, publicResponseConfig, buildCustomResponse } from '../../src/custom-response.js';
+import { normalizeSignaturePatch, publicSignatureConfig, verifySignature } from '../../src/signature.js';
 
 const TIERS = {
   free: { name: 'Free', maxInboxes: 1, maxEventsKeep: 50, maxEventsMonth: 500, alerts: false },
@@ -81,6 +82,7 @@ function publicInbox(inbox) {
     alertEmail: inbox.alertEmail || '',
     notifyWebhookUrl: inbox.notifyWebhookUrl || '',
     ...publicResponseConfig(inbox),
+    ...publicSignatureConfig(inbox),
     eventCount: inbox.eventCount || 0,
     createdAt: inbox.createdAt,
   };
@@ -97,6 +99,7 @@ function summarizeEvent(e) {
     contentType: e.contentType,
     respondedStatus: e.respondedStatus ?? 200,
     respondedCustom: Boolean(e.respondedCustom),
+    signature: e.signature || null,
   };
 }
 
@@ -117,6 +120,7 @@ function toExportEvent(e) {
     size: e.size,
   };
   if (e.respondedStatus != null) out.respondedStatus = e.respondedStatus;
+  if (e.signature && typeof e.signature === 'object') out.signature = e.signature;
   if (e.path) out.path = e.path;
   if (e.url) out.url = e.url;
   if (e.autoForward && typeof e.autoForward === 'object') {
@@ -138,7 +142,17 @@ function escapeCsvField(val) {
 }
 
 function eventsToCsv(events) {
-  const header = ['id', 'receivedAt', 'method', 'status', 'contentType', 'bodyPreview', 'autoForwardOk'];
+  const header = [
+    'id',
+    'receivedAt',
+    'method',
+    'status',
+    'contentType',
+    'bodyPreview',
+    'autoForwardOk',
+    'signatureValid',
+    'signatureReason',
+  ];
   const lines = [header.join(',')];
   for (const e of events) {
     const body = String(e.bodyText || '');
@@ -149,6 +163,7 @@ function eventsToCsv(events) {
           ? 'true'
           : 'false'
         : '';
+    const sg = e.signature && typeof e.signature === 'object' ? e.signature : null;
     lines.push(
       [
         escapeCsvField(e.id),
@@ -158,6 +173,8 @@ function eventsToCsv(events) {
         escapeCsvField(e.contentType || ''),
         escapeCsvField(preview),
         escapeCsvField(af),
+        escapeCsvField(sg ? (sg.valid ? 'true' : 'false') : ''),
+        escapeCsvField(sg ? sg.reason || '' : ''),
       ].join(',')
     );
   }
@@ -165,7 +182,17 @@ function eventsToCsv(events) {
 }
 
 /** Collect filtered raw events (same predicates as list path). */
-async function collectFilteredEvents(kv, inboxId, limits, { q, methodFilter, statusMin, cap, outKeys = null }) {
+/** sig filter: valid | invalid | unchecked (anything else = no filter) — Node parity. */
+function signatureFilterMatch(ev, sig) {
+  const f = String(sig || '').toLowerCase();
+  const s = ev && ev.signature;
+  if (f === 'valid') return Boolean(s && s.valid === true);
+  if (f === 'invalid') return Boolean(s && s.valid === false);
+  if (f === 'unchecked') return !s;
+  return true;
+}
+
+async function collectFilteredEvents(kv, inboxId, limits, { q, methodFilter, statusMin, cap, sig = '', outKeys = null }) {
   const listed = await kv.list({ prefix: `evt:${inboxId}:`, limit: limits.maxEventsKeep });
   const events = [];
   for (const k of listed.keys) {
@@ -185,6 +212,7 @@ async function collectFilteredEvents(kv, inboxId, limits, { q, methodFilter, sta
       const n = Number(String(ev.statusGuess ?? '').trim());
       if (Number.isNaN(n) || n < statusMin) continue;
     }
+    if (sig && !signatureFilterMatch(ev, sig)) continue;
     events.push(ev);
     if (outKeys) outKeys.push(k.name);
   }
@@ -504,9 +532,13 @@ export default {
         rolloverMonth(ws);
         const limits = TIERS[ws.tier] || TIERS.free;
 
-        const bodyText = await request.text();
+        // Raw bytes exactly as received — signatures are computed over these
+        const rawBody = new Uint8Array(await request.arrayBuffer());
+        const bodyText = new TextDecoder().decode(rawBody);
         const headers = {};
         request.headers.forEach((v, k) => (headers[k] = v));
+        // Per-inbox signature check — recorded on the event only; capture + response unchanged
+        const signature = await verifySignature(inbox, { headers, rawBody });
         const contentType = request.headers.get('content-type') || '';
 
         let parsed = null;
@@ -529,8 +561,9 @@ export default {
           contentType,
           statusGuess: statusGuess != null ? String(statusGuess).slice(0, 80) : null,
           receivedAt: new Date(ts).toISOString(),
-          size: new TextEncoder().encode(bodyText || '').length,
+          size: rawBody.byteLength,
         };
+        if (signature) event.signature = signature;
 
         // Per-inbox custom ingest response (status/body/content-type) — free tier OK
         const customResponse = buildCustomResponse(inbox, event);
@@ -696,6 +729,9 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           responseStatus: 0,
           responseBody: '',
           responseContentType: '',
+          signingScheme: 'none',
+          signingSecret: '',
+          signingHeader: '',
           createdAt: new Date().toISOString(),
           eventCount: 0,
         };
@@ -752,6 +788,9 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           responseStatus: 0,
           responseBody: '',
           responseContentType: '',
+          signingScheme: 'none',
+          signingSecret: '',
+          signingHeader: '',
           createdAt: new Date().toISOString(),
           eventCount: 0,
         };
@@ -773,7 +812,10 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
         if (!inbox || inbox.workspaceId !== ws.id) return json({ error: 'not_found' }, 404);
         const rp = normalizeResponsePatch(body);
         if (!rp.ok) return json({ error: rp.error, message: rp.message }, 400);
+        const sp = normalizeSignaturePatch(body);
+        if (!sp.ok) return json({ error: sp.error, message: sp.message }, 400);
         Object.assign(inbox, rp.patch);
+        Object.assign(inbox, sp.patch);
         if (body.name != null) inbox.name = String(body.name).slice(0, 80);
         if (body.forwardUrl != null) inbox.forwardUrl = String(body.forwardUrl).slice(0, 500);
         if (body.autoForward != null) inbox.autoForward = Boolean(body.autoForward);
@@ -804,11 +846,13 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
         const statusMinRaw = url.searchParams.get('statusMin');
         const statusMin =
           statusMinRaw === null || statusMinRaw === '' ? null : Number(statusMinRaw);
+        const sig = url.searchParams.get('sig') || '';
         const raw = await collectFilteredEvents(kv, inboxId, limits, {
           q,
           methodFilter,
           statusMin,
           cap,
+          sig,
         });
         const day = new Date().toISOString().slice(0, 10);
         const filename = `hookkeep-events-${inboxId}-${day}.${format}`;
@@ -829,6 +873,7 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
             q: q || undefined,
             method: methodFilter || undefined,
             statusMin: statusMin == null || Number.isNaN(statusMin) ? undefined : statusMin,
+            sig: sig || undefined,
             limit,
           },
           events: raw.map(toExportEvent),
@@ -979,6 +1024,7 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           methodFilter,
           statusMin,
           cap,
+          sig: url.searchParams.get('sig') || '',
         });
         return json({ events: raw.map(summarizeEvent) });
       }

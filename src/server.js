@@ -9,6 +9,7 @@ import { cors } from 'hono/cors';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as db from './db.js';
+import { verifySignature } from './signature.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -176,7 +177,7 @@ app.patch('/api/inboxes/:id', async (c) => {
   try {
     inbox = db.updateInbox(ws, c.req.param('id'), body);
   } catch (e) {
-    if (e.code === 'bad_response_status') {
+    if (['bad_response_status', 'bad_signing_scheme', 'bad_signing_secret', 'bad_signing_header'].includes(e.code)) {
       return c.json({ error: e.code, message: e.message }, 400);
     }
     throw e;
@@ -199,7 +200,8 @@ app.get('/api/inboxes/:id/events/export', (c) => {
   const statusMin =
     statusMinRaw === undefined || statusMinRaw === '' ? null : Number(statusMinRaw);
   const limit = Number(c.req.query('limit') || 50);
-  const hit = db.exportEvents(ws, inboxId, { q, method, statusMin, limit });
+  const sig = c.req.query('sig') || '';
+  const hit = db.exportEvents(ws, inboxId, { q, method, statusMin, limit, sig });
   if (!hit) return c.json({ error: 'not_found' }, 404);
   const day = new Date().toISOString().slice(0, 10);
   const filename = `hookkeep-events-${inboxId}-${day}.${format}`;
@@ -207,6 +209,7 @@ app.get('/api/inboxes/:id/events/export', (c) => {
     q: q || undefined,
     method: method || undefined,
     statusMin: statusMin == null || Number.isNaN(statusMin) ? undefined : statusMin,
+    sig: sig || undefined,
     limit,
   };
   if (format === 'csv') {
@@ -306,6 +309,7 @@ app.get('/api/inboxes/:id/events', (c) => {
     q,
     method,
     statusMin,
+    sig: c.req.query('sig') || '',
     limit: Number(c.req.query('limit') || 50),
   });
   if (!events) return c.json({ error: 'not_found' }, 404);
@@ -376,19 +380,27 @@ app.post('/api/waitlist', async (c) => {
 /** Public webhook ingest — any method */
 async function ingest(c) {
   const inboxId = c.req.param('inboxId');
-  if (!db.getInbox(inboxId)) {
+  const inbox = db.getInbox(inboxId);
+  if (!inbox) {
     return c.json({ ok: false, error: 'unknown_inbox' }, 404);
   }
-  const bodyText = await c.req.text();
+  // Raw bytes exactly as received — signatures are computed over these, not a re-encoded string
+  const rawBody = new Uint8Array(await c.req.arrayBuffer());
+  const bodyText = new TextDecoder().decode(rawBody);
   const headers = {};
   c.req.raw.headers.forEach((v, k) => {
     headers[k] = v;
   });
+  // Per-inbox signature check (stripe / github / hmac-sha256). Result is recorded on the
+  // event only — capture is always stored and the ingest response is unchanged.
+  const signature = await verifySignature(inbox, { headers, rawBody });
   const result = db.ingestEvent(inboxId, {
     method: c.req.method,
     headers,
     bodyText,
     contentType: c.req.header('content-type') || '',
+    signature,
+    size: rawBody.byteLength,
   });
   if (!result.ok) return c.json(result, 404);
   const resp = { ok: true, id: result.eventId, received: true };
