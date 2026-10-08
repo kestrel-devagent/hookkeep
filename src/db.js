@@ -8,6 +8,14 @@ import { fileURLToPath } from 'node:url';
 import { customAlphabet } from 'nanoid';
 import { normalizeResponsePatch, publicResponseConfig, buildCustomResponse } from './custom-response.js';
 import { normalizeSignaturePatch, publicSignatureConfig } from './signature.js';
+import {
+  normalizePinPatch,
+  applyPinPatch,
+  pinnedFilterMatch,
+  rowsToTrim,
+  publicPinFields,
+  pinLimitFor,
+} from './event-pin.js';
 
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 12);
 const id16 = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 16);
@@ -19,8 +27,8 @@ const ALERTS_PATH = path.join(DATA_DIR, 'alerts.ndjson');
 const PAY_CONTACT = 'hudson.gouge@projxon.ai';
 
 const TIERS = {
-  free: { name: 'Free', maxInboxes: 1, maxEventsKeep: 50, maxEventsMonth: 500, alerts: false },
-  paid: { name: 'Pro', maxInboxes: 5, maxEventsKeep: 5000, maxEventsMonth: 5000, alerts: true },
+  free: { name: 'Free', maxInboxes: 1, maxEventsKeep: 50, maxEventsMonth: 500, alerts: false, maxPinned: 5 },
+  paid: { name: 'Pro', maxInboxes: 5, maxEventsKeep: 5000, maxEventsMonth: 5000, alerts: true, maxPinned: 100 },
 };
 
 function ensure() {
@@ -255,12 +263,12 @@ export function ingestEvent(inboxId, { method, headers, bodyText, contentType, s
   inbox.eventCount = (inbox.eventCount || 0) + 1;
   ws.eventsThisMonth = (ws.eventsThisMonth || 0) + 1;
 
-  // Trim to keep window (per inbox)
+  // Trim to keep window (per inbox) — pinned events are exempt and don't count toward it
   const keep = limits.maxEventsKeep;
   const inboxEvents = Object.values(db.events)
     .filter((e) => e.inboxId === inboxId)
     .sort((a, b) => (a.receivedAt < b.receivedAt ? 1 : -1));
-  for (const old of inboxEvents.slice(keep)) {
+  for (const old of rowsToTrim(inboxEvents, keep)) {
     delete db.events[old.id];
   }
 
@@ -449,7 +457,7 @@ const BODY_EXPORT_MAX = 8192;
 const BODY_CSV_PREVIEW = 200;
 
 /** Shared filter + keep-cap for listEvents / exportEvents (same semantics). */
-function queryInboxEvents(ws, inboxId, { q = '', method = '', statusMin = null, limit = 50, sig = '' } = {}) {
+function queryInboxEvents(ws, inboxId, { q = '', method = '', statusMin = null, limit = 50, sig = '', pinned = '' } = {}) {
   const db = read();
   const inbox = db.inboxes[inboxId];
   if (!inbox || inbox.workspaceId !== ws.id) return null;
@@ -479,7 +487,8 @@ function queryInboxEvents(ws, inboxId, { q = '', method = '', statusMin = null, 
     });
   }
   if (sig) rows = rows.filter((e) => signatureFilterMatch(e, sig));
-  const cap = Math.min(Number(limit) || 50, limits.maxEventsKeep);
+  if (pinned !== '' && pinned != null) rows = rows.filter((e) => pinnedFilterMatch(e, pinned));
+  const cap = Math.min(Number(limit) || 50, limits.maxEventsKeep + pinLimitFor(ws.tier));
   return { rows: rows.slice(0, cap), inbox, limits, cap };
 }
 
@@ -515,6 +524,8 @@ export function toExportEvent(e) {
   };
   if (e.respondedStatus != null) out.respondedStatus = e.respondedStatus;
   if (e.signature && typeof e.signature === 'object') out.signature = e.signature;
+  if (e.pinned) out.pinned = true;
+  if (e.note) out.note = e.note;
   if (e.path) out.path = e.path;
   if (e.url) out.url = e.url;
   if (e.autoForward && typeof e.autoForward === 'object') {
@@ -546,6 +557,8 @@ export function eventsToCsv(events) {
     'autoForwardOk',
     'signatureValid',
     'signatureReason',
+    'pinned',
+    'note',
   ];
   const lines = [header.join(',')];
   for (const e of events) {
@@ -569,6 +582,8 @@ export function eventsToCsv(events) {
         escapeCsvField(af),
         escapeCsvField(sg ? (sg.valid ? 'true' : 'false') : ''),
         escapeCsvField(sg ? sg.reason || '' : ''),
+        escapeCsvField(e.pinned ? 'true' : ''),
+        escapeCsvField(e.note || ''),
       ].join(',')
     );
   }
@@ -762,11 +777,18 @@ export async function replayEventsBulk(
 export function deleteEventsBulk(
   ws,
   inboxId,
-  { q = '', method = '', statusMin = null, limit = 50, confirm = false } = {}
+  { q = '', method = '', statusMin = null, limit = 50, confirm = false, includePinned = false } = {}
 ) {
   const HARD_MAX = 50;
   const reqLimit = Math.min(Number(limit) || 50, HARD_MAX);
-  const hit = queryInboxEvents(ws, inboxId, { q, method, statusMin, limit: reqLimit });
+  // Pinned events are skipped unless the caller explicitly opts in
+  const hit = queryInboxEvents(ws, inboxId, {
+    q,
+    method,
+    statusMin,
+    limit: reqLimit,
+    pinned: includePinned ? '' : '0',
+  });
   if (!hit) return null;
   if (confirm !== true) {
     return {
@@ -779,6 +801,7 @@ export function deleteEventsBulk(
     method: method || undefined,
     statusMin: statusMin == null || statusMin === '' || Number.isNaN(Number(statusMin)) ? undefined : Number(statusMin),
     limit: reqLimit,
+    includePinned: includePinned || undefined,
   };
   const db = read();
   const inbox = db.inboxes[inboxId];
@@ -792,6 +815,28 @@ export function deleteEventsBulk(
   if (inbox) inbox.eventCount = Math.max(0, (inbox.eventCount || 0) - ids.length);
   write(db);
   return { ok: true, inboxId, filters, deleted: ids.length, ids };
+}
+
+/**
+ * PATCH an event's pin/note. Returns null (not found), { ok:false, error, ... } on validation
+ * or pin-limit errors (nothing applied), or { ok:true, event }.
+ */
+export function updateEventPin(ws, eventId, body) {
+  const np = normalizePinPatch(body);
+  if (!np.ok) return np;
+  const db = read();
+  const ev = db.events[eventId];
+  if (!ev) return null;
+  const inbox = db.inboxes[ev.inboxId];
+  if (!inbox || inbox.workspaceId !== ws.id) return null;
+  const live = db.workspaces[ws.id] || ws;
+  const pinnedCount = Object.values(db.events).filter(
+    (e) => e.inboxId === ev.inboxId && e.pinned && e.id !== ev.id
+  ).length;
+  const res = applyPinPatch(ev, np.patch, { pinnedCount, limit: pinLimitFor(live.tier) });
+  if (!res.ok) return res;
+  write(db);
+  return { ok: true, event: ev, pinnedCount: pinnedCount + (ev.pinned ? 1 : 0), pinLimit: pinLimitFor(live.tier) };
 }
 
 export function addWaitlist({ email, note = '' }) {
@@ -903,6 +948,7 @@ function summarizeEvent(e) {
     respondedStatus: e.respondedStatus ?? 200,
     respondedCustom: Boolean(e.respondedCustom),
     signature: e.signature || null,
+    ...publicPinFields(e),
   };
 }
 

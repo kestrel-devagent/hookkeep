@@ -11,15 +11,24 @@
  *   wait:<email>              -> waitlist entry
  *   email:<email>             -> workspace id (for billing fulfill lookup)
  *   code:<CODE>               -> unlock code entry { tier, usedBy, note }
+ *   pins:<inboxId>            -> JSON array of pinned event ids (exempt from keep-window trim)
  */
 
 // Shared with the Node server (pure ESM, zero deps — wrangler bundles it).
 import { normalizeResponsePatch, publicResponseConfig, buildCustomResponse } from '../../src/custom-response.js';
 import { normalizeSignaturePatch, publicSignatureConfig, verifySignature } from '../../src/signature.js';
+import {
+  normalizePinPatch,
+  applyPinPatch,
+  pinnedFilterMatch,
+  rowsToTrim,
+  publicPinFields,
+  pinLimitFor,
+} from '../../src/event-pin.js';
 
 const TIERS = {
-  free: { name: 'Free', maxInboxes: 1, maxEventsKeep: 50, maxEventsMonth: 500, alerts: false },
-  paid: { name: 'Pro', maxInboxes: 5, maxEventsKeep: 5000, maxEventsMonth: 5000, alerts: true },
+  free: { name: 'Free', maxInboxes: 1, maxEventsKeep: 50, maxEventsMonth: 500, alerts: false, maxPinned: 5 },
+  paid: { name: 'Pro', maxInboxes: 5, maxEventsKeep: 5000, maxEventsMonth: 5000, alerts: true, maxPinned: 100 },
 };
 
 // Demo/launch codes — real codes should be written to KV (see README).
@@ -100,6 +109,7 @@ function summarizeEvent(e) {
     respondedStatus: e.respondedStatus ?? 200,
     respondedCustom: Boolean(e.respondedCustom),
     signature: e.signature || null,
+    ...publicPinFields(e),
   };
 }
 
@@ -121,6 +131,8 @@ function toExportEvent(e) {
   };
   if (e.respondedStatus != null) out.respondedStatus = e.respondedStatus;
   if (e.signature && typeof e.signature === 'object') out.signature = e.signature;
+  if (e.pinned) out.pinned = true;
+  if (e.note) out.note = e.note;
   if (e.path) out.path = e.path;
   if (e.url) out.url = e.url;
   if (e.autoForward && typeof e.autoForward === 'object') {
@@ -152,6 +164,8 @@ function eventsToCsv(events) {
     'autoForwardOk',
     'signatureValid',
     'signatureReason',
+    'pinned',
+    'note',
   ];
   const lines = [header.join(',')];
   for (const e of events) {
@@ -175,6 +189,8 @@ function eventsToCsv(events) {
         escapeCsvField(af),
         escapeCsvField(sg ? (sg.valid ? 'true' : 'false') : ''),
         escapeCsvField(sg ? sg.reason || '' : ''),
+        escapeCsvField(e.pinned ? 'true' : ''),
+        escapeCsvField(e.note || ''),
       ].join(',')
     );
   }
@@ -192,8 +208,8 @@ function signatureFilterMatch(ev, sig) {
   return true;
 }
 
-async function collectFilteredEvents(kv, inboxId, limits, { q, methodFilter, statusMin, cap, sig = '', outKeys = null }) {
-  const listed = await kv.list({ prefix: `evt:${inboxId}:`, limit: limits.maxEventsKeep });
+async function collectFilteredEvents(kv, inboxId, limits, { q, methodFilter, statusMin, cap, sig = '', pinned = '', outKeys = null }) {
+  const listed = await kv.list({ prefix: `evt:${inboxId}:`, limit: limits.maxEventsKeep + (limits.maxPinned || 0) });
   const events = [];
   for (const k of listed.keys) {
     if (events.length >= cap) break;
@@ -213,6 +229,7 @@ async function collectFilteredEvents(kv, inboxId, limits, { q, methodFilter, sta
       if (Number.isNaN(n) || n < statusMin) continue;
     }
     if (sig && !signatureFilterMatch(ev, sig)) continue;
+    if (pinned !== '' && pinned != null && !pinnedFilterMatch(ev, pinned)) continue;
     events.push(ev);
     if (outKeys) outKeys.push(k.name);
   }
@@ -362,6 +379,17 @@ async function listInboxIds(kv, wsId) {
 }
 async function getInbox(kv, inboxId) {
   return kv.get(`inbox:${inboxId}`, 'json');
+}
+async function getPins(kv, inboxId) {
+  return (await kv.get(`pins:${inboxId}`, 'json')) || [];
+}
+/** Trim an inbox's KV events to the keep window; pinned ids are exempt and don't count. */
+async function trimInboxEvents(kv, inboxId, keep) {
+  const [keys, pins] = await Promise.all([kv.list({ prefix: `evt:${inboxId}:` }), getPins(kv, inboxId)]);
+  const pinSet = new Set(pins);
+  const extra = rowsToTrim(keys.keys, keep, (k) => [...pinSet].some((id) => k.name.endsWith(`_${id}`)));
+  await Promise.all(extra.map((k) => kv.delete(k.name)));
+  return extra.length;
 }
 
 /** Resolve workspace by id or email (email via email:<em> index). */
@@ -629,10 +657,8 @@ export default {
             await kv.put(evKey(inboxId, ts, eventId), JSON.stringify(event));
             await kv.put(`inbox:${inboxId}`, JSON.stringify(inbox));
             await saveWorkspace(kv, ws);
-            // Trim to keep window
-            const keys = await kv.list({ prefix: `evt:${inboxId}:` });
-            const extra = keys.keys.slice(limits.maxEventsKeep);
-            await Promise.all(extra.map((k) => kv.delete(k.name)));
+            // Trim to keep window (pinned events exempt)
+            await trimInboxEvents(kv, inboxId, limits.maxEventsKeep);
           })()
         );
 
@@ -840,19 +866,21 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
         }
         const limits = TIERS[ws.tier] || TIERS.free;
         const limit = Number(url.searchParams.get('limit') || 50);
-        const cap = Math.min(limit || 50, limits.maxEventsKeep);
+        const cap = Math.min(limit || 50, limits.maxEventsKeep + (limits.maxPinned || 0));
         const q = (url.searchParams.get('q') || '').toLowerCase();
         const methodFilter = (url.searchParams.get('method') || '').toUpperCase();
         const statusMinRaw = url.searchParams.get('statusMin');
         const statusMin =
           statusMinRaw === null || statusMinRaw === '' ? null : Number(statusMinRaw);
         const sig = url.searchParams.get('sig') || '';
+        const pinned = url.searchParams.get('pinned') || '';
         const raw = await collectFilteredEvents(kv, inboxId, limits, {
           q,
           methodFilter,
           statusMin,
           cap,
           sig,
+          pinned,
         });
         const day = new Date().toISOString().slice(0, 10);
         const filename = `hookkeep-events-${inboxId}-${day}.${format}`;
@@ -984,22 +1012,30 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
             ? null
             : Number(statusMinRaw);
         const keys = [];
+        const includePinned = body.includePinned === true;
         const raw = await collectFilteredEvents(kv, inboxId, limits, {
           q,
           methodFilter,
           statusMin,
           cap,
+          pinned: includePinned ? '' : '0',
           outKeys: keys,
         });
         await Promise.all(keys.map((k) => kv.delete(k)));
         const ids = raw.map((ev) => ev.id);
         inbox.eventCount = Math.max(0, (inbox.eventCount || 0) - ids.length);
         await kv.put(`inbox:${inboxId}`, JSON.stringify(inbox));
+        if (includePinned) {
+          const pins = await getPins(kv, inboxId);
+          const left = pins.filter((id) => !ids.includes(id));
+          if (left.length !== pins.length) await kv.put(`pins:${inboxId}`, JSON.stringify(left));
+        }
         const filters = {
           q: q || undefined,
           method: methodFilter || undefined,
           statusMin: statusMin == null || Number.isNaN(statusMin) ? undefined : statusMin,
           limit: reqLimit,
+          includePinned: includePinned || undefined,
         };
         return json({ ok: true, inboxId, filters, deleted: ids.length, ids }, 200);
       }
@@ -1012,7 +1048,7 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
         const inbox = await getInbox(kv, inboxId);
         if (!inbox || inbox.workspaceId !== ws.id) return json({ error: 'not_found' }, 404);
         const limits = TIERS[ws.tier] || TIERS.free;
-        const cap = Math.min(Number(url.searchParams.get('limit') || 50), limits.maxEventsKeep);
+        const cap = Math.min(Number(url.searchParams.get('limit') || 50), limits.maxEventsKeep + (limits.maxPinned || 0));
         // Mirror Node listEvents filters: q / method / statusMin
         const q = (url.searchParams.get('q') || '').toLowerCase();
         const methodFilter = (url.searchParams.get('method') || '').toUpperCase();
@@ -1025,6 +1061,7 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           statusMin,
           cap,
           sig: url.searchParams.get('sig') || '',
+          pinned: url.searchParams.get('pinned') || '',
         });
         return json({ events: raw.map(summarizeEvent) });
       }
@@ -1059,7 +1096,7 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
             for (const k of listed.keys) {
               if (k.name.endsWith(`_${eventId.slice(3)}`) || k.name.includes(eventId)) {
                 const ev = await kv.get(k.name, 'json');
-                if (ev && ev.id === eventId) return { ev, inboxId: iid };
+                if (ev && ev.id === eventId) return { ev, inboxId: iid, key: k.name };
               }
             }
           }
@@ -1070,6 +1107,32 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           const found = await findEvent();
           if (!found) return json({ error: 'not_found' }, 404);
           return json({ event: found.ev });
+        }
+
+        // Pin / note (Node parity): pinned events skip the keep-window trim + bulk delete
+        if (!eventMatch[2] && request.method === 'PATCH') {
+          const body = await request.json().catch(() => null);
+          const np = normalizePinPatch(body);
+          if (!np.ok) {
+            const { ok, ...rest } = np;
+            return json(rest, 400);
+          }
+          const found = await findEvent();
+          if (!found) return json({ error: 'not_found' }, 404);
+          const { ev, inboxId, key } = found;
+          const pins = await getPins(kv, inboxId);
+          const others = pins.filter((id) => id !== ev.id);
+          const limit = pinLimitFor(ws.tier);
+          const res = applyPinPatch(ev, np.patch, { pinnedCount: others.length, limit });
+          if (!res.ok) {
+            const { ok, ...rest } = res;
+            return json(rest, 409);
+          }
+          await kv.put(key, JSON.stringify(ev));
+          const nextPins = ev.pinned ? [...others, ev.id] : others;
+          if (nextPins.length !== pins.length || res.changedPin)
+            await kv.put(`pins:${inboxId}`, JSON.stringify(nextPins));
+          return json({ ok: true, event: ev, pinnedCount: nextPins.length, pinLimit: limit });
         }
 
         if (eventMatch[2] && request.method === 'POST') {

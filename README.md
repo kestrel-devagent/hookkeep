@@ -89,12 +89,18 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
   **write-only** — APIs return only `hasSigningSecret` + `signingSecretHint` (`••••` + last 4); `signingSecret: ""` clears it.
   Capture is always stored and the ingest response is unchanged (custom response still applies). Bad scheme → 400 `bad_signing_scheme`
   (patch not applied). Free tier OK. Dashboard: sidebar **Signature check** panel; event rows show `✓ sig` / `✗ sig`; detail shows the reason.
-- `GET /api/inboxes/:id/events?q=&method=&statusMin=&sig=` (text / HTTP method / status ≥ N / signature `valid|invalid|unchecked`)
-- `GET /api/inboxes/:id/events/export?format=json|csv&q=&method=&statusMin=&sig=&limit=` → bulk download of the **current filtered** set (same filters/cap as list; free tier OK; JSON rows carry `signature`, CSV adds `signatureValid,signatureReason`)
+- **Pin + note an event** — `PATCH /api/events/:id` `{ pinned?: boolean, note?: string|null }` (note ≤ 280 chars). A pinned event is
+  **exempt from the keep-window trim** (free keeps the newest 50 *unpinned* events, Pro 5000) and is **skipped by bulk delete** unless
+  you pass `includePinned: true` — so the one failing payload you're debugging doesn't scroll away during a retry storm. Pins per inbox:
+  free 5, Pro 100 (`limits.maxPinned`); over the limit → 409 `pin_limit`. Bad input → 400 `bad_pinned` / `bad_note` / `empty_patch`
+  (nothing applied). List/export rows carry `pinned` + `note`; CSV adds trailing `pinned,note`. Shared `src/event-pin.js` (Node + Workers;
+  Workers tracks ids in KV `pins:<inboxId>`). Dashboard: **📌 Pin** + note field on the event detail, 📌 badge in the list, *Pinned only* filter.
+- `GET /api/inboxes/:id/events?q=&method=&statusMin=&sig=&pinned=` (text / HTTP method / status ≥ N / signature `valid|invalid|unchecked` / `pinned=1|0`)
+- `GET /api/inboxes/:id/events/export?format=json|csv&q=&method=&statusMin=&sig=&pinned=&limit=` → bulk download of the **current filtered** set (same filters/cap as list; free tier OK; JSON rows carry `signature`, CSV adds `signatureValid,signatureReason,pinned,note`)
 - `POST /api/inboxes/:id/events/replay-bulk` `{ targetUrl?, q?, method?, statusMin?, limit? }` → serially replay the **current filtered** set via the same forward path (default/hard max 50; free tier OK). Target = `targetUrl` else inbox `forwardUrl`; neither → 400 `no_forward_url`.
-- `POST /api/inboxes/:id/events/delete-bulk` `{ q?, method?, statusMin?, limit?, confirm: true }` → delete the **current filtered** set (same filters; default/hard max 50; free tier OK). Missing `confirm: true` → 400 `confirm_required`. Returns `{ ok, inboxId, filters, deleted, ids }`; inbox `eventCount` decremented.
+- `POST /api/inboxes/:id/events/delete-bulk` `{ q?, method?, statusMin?, limit?, confirm: true, includePinned? }` → delete the **current filtered** set (same filters; default/hard max 50; free tier OK; pinned events skipped unless `includePinned: true`). Missing `confirm: true` → 400 `confirm_required`. Returns `{ ok, inboxId, filters, deleted, ids }`; inbox `eventCount` decremented.
 - `GET /api/inboxes/:id/alerts?limit=20` → recent Pro alert records
-- `GET /api/events/:id`
+- `GET /api/events/:id` · `PATCH /api/events/:id` (pin/note)
 - `POST /api/events/:id/replay` `{ "targetUrl?: string" }`
 - **Auto-forward on ingest** — when an inbox has `forwardUrl` + `autoForward: true`, each
   captured request is POSTed to `forwardUrl` (same headers/body as replay, ~8s timeout).

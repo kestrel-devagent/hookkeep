@@ -160,7 +160,7 @@ async function main() {
   const expCsv = await expCsvRes.text();
   const csvLines = expCsv.trim().split(/\r?\n/);
   check(
-    csvLines[0] === 'id,receivedAt,method,status,contentType,bodyPreview,autoForwardOk,signatureValid,signatureReason',
+    csvLines[0] === 'id,receivedAt,method,status,contentType,bodyPreview,autoForwardOk,signatureValid,signatureReason,pinned,note',
     'csv header mismatch'
   );
   check(csvLines.length >= 3, `csv expected header+rows, got ${csvLines.length}`);
@@ -513,7 +513,7 @@ async function main() {
   const sgInvalid = await fetch(`${BASE}/api/inboxes/${free.inbox.id}/events?sig=invalid&limit=50`, { headers: sgHdr }).then((r) => r.json());
   check(sgInvalid.events.length >= 3 && sgInvalid.events.every((e) => e.signature && e.signature.valid === false), 'sig=invalid filter');
   const sgCsv = await fetch(`${BASE}/api/inboxes/${free.inbox.id}/events/export?format=csv&sig=valid`, { headers: sgHdr }).then((r) => r.text());
-  check(sgCsv.trim().split('\n').slice(1).every((l) => l.endsWith(',true,ok')) && sgCsv.includes(sgOkJson.id), 'csv signature columns');
+  check(sgCsv.trim().split('\n').slice(1).every((l) => l.endsWith(',true,ok,,')) && sgCsv.includes(sgOkJson.id), 'csv signature columns');
   // GitHub
   const ghSecret = 'gh-smoke-secret';
   await sgPatch({ signingScheme: 'github', signingSecret: ghSecret });
@@ -532,6 +532,56 @@ async function main() {
   const sgClear = await sgPatch({ signingScheme: 'none', signingSecret: '', signingHeader: '', responseStatus: 0 }).then((r) => r.json());
   check(sgClear.inbox?.signingScheme === 'none' && sgClear.inbox?.hasSigningSecret === false, 'clear signature config failed');
   console.log('signature: 400 bad scheme / secret masked / stripe ok+multi-v1 / tampered / expired / missing / github ok+mismatch / hmac custom header / filter+csv / custom response intact');
+
+  step('event pin + note');
+  {
+    const pc = await fetch(`${BASE}/api/workspace`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ label: 'pin-smoke' }),
+    }).then((r) => r.json());
+    const pAuth = { 'x-hookkeep-token': pc.ownerToken, 'content-type': 'application/json' };
+    const pInbox = pc.inbox.id;
+    check(pc.workspace?.limits?.maxPinned === 5, 'free maxPinned should be 5');
+    const firstHook = await fetch(`${BASE}/hook/${pInbox}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'invoice.payment_failed', n: 0 }),
+    });
+    const firstId = firstHook.headers.get('x-hookkeep-event-id') || (await firstHook.json()).id;
+    check(firstId, 'no event id from first hook');
+    const pPatch = (id, b) =>
+      fetch(`${BASE}/api/events/${id}`, { method: 'PATCH', headers: pAuth, body: JSON.stringify(b) });
+    const badPin = await pPatch(firstId, { pinned: 'yes' });
+    check(badPin.status === 400 && (await badPin.json()).error === 'bad_pinned', 'bad_pinned not 400');
+    const noAuth = await fetch(`${BASE}/api/events/${firstId}`, { method: 'PATCH', body: '{"pinned":true}' });
+    check(noAuth.status === 401, `unauth PATCH should 401, got ${noAuth.status}`);
+    const pinned = await pPatch(firstId, { pinned: true, note: 'prod failure repro' }).then((r) => r.json());
+    check(pinned.ok && pinned.event?.pinned === true && pinned.pinnedCount === 1, `pin failed ${JSON.stringify(pinned)}`);
+    for (let i = 1; i <= 52; i++) {
+      await fetch(`${BASE}/hook/${pInbox}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ n: i }),
+      });
+    }
+    const pl = await fetch(`${BASE}/api/inboxes/${pInbox}/events?limit=500`, { headers: pAuth }).then((r) => r.json());
+    check(pl.events.length === 51, `expected 50 + 1 pinned, got ${pl.events.length}`);
+    check(pl.events.some((e) => e.id === firstId && e.pinned && e.note === 'prod failure repro'), 'pinned event trimmed');
+    const onlyP = await fetch(`${BASE}/api/inboxes/${pInbox}/events?pinned=1`, { headers: pAuth }).then((r) => r.json());
+    check(onlyP.events.length === 1 && onlyP.events[0].id === firstId, 'pinned=1 filter');
+    const pCsv = await fetch(`${BASE}/api/inboxes/${pInbox}/events/export?format=csv&pinned=1`, { headers: pAuth }).then((r) => r.text());
+    check(pCsv.includes(',true,prod failure repro'), 'csv pinned/note columns');
+    const pDel = await fetch(`${BASE}/api/inboxes/${pInbox}/events/delete-bulk`, {
+      method: 'POST',
+      headers: pAuth,
+      body: JSON.stringify({ confirm: true }),
+    }).then((r) => r.json());
+    check(pDel.deleted === 50 && !pDel.ids.includes(firstId), `delete-bulk should skip pinned (${pDel.deleted})`);
+    const unp = await pPatch(firstId, { pinned: false, note: null }).then((r) => r.json());
+    check(unp.ok && !unp.event.pinned && !unp.event.note, 'unpin/clear note');
+    console.log('pin: 400 bad / 401 unauth / pinned survives 50-event trim / ?pinned=1 / csv / bulk delete skips pinned / unpin');
+  }
 
   step('waitlist');
   const wait = await fetch(`${BASE}/api/waitlist`, {

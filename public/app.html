@@ -119,7 +119,13 @@
             <button class="btn btn-sm" id="btn-copy-curl" title="Copy a curl that replays this capture">Copy as curl</button>
             <button class="btn btn-sm" id="btn-dl-json" title="Download the full capture as JSON">Download JSON</button>
             <button class="btn btn-sm" id="btn-copy-body">Copy body</button>
+            <button class="btn btn-sm" id="btn-pin" title="Pinned events are never trimmed by the keep window or bulk delete">📌 Pin</button>
           </div>
+          <div class="row" style="margin:0.5rem 0;gap:0.5rem;align-items:center">
+            <input id="ev-note" type="text" maxlength="280" placeholder="Note (e.g. “prod failure 10/8 — repro”)" style="flex:1;min-width:10rem" />
+            <button class="btn btn-sm" id="btn-save-note">Save note</button>
+          </div>
+          <p id="pin-status" class="muted" style="font-size:0.8rem;margin:0.25rem 0" hidden></p>
           <details id="curl-panel" class="curl-panel" style="margin:0.75rem 0">
             <summary class="muted" style="cursor:pointer;font-size:0.85rem">curl replay snippet</summary>
             <pre id="ev-curl" style="margin-top:0.5rem;white-space:pre-wrap;word-break:break-all"></pre>
@@ -154,6 +160,11 @@
             </select>
             <input id="filter-status-min" type="number" min="0" step="1" placeholder="Status ≥"
               aria-label="Minimum numeric statusGuess" style="width:6.5rem" />
+            <select id="filter-pinned" aria-label="Pinned filter" style="max-width:8.5rem">
+              <option value="">All events</option>
+              <option value="1">📌 Pinned only</option>
+              <option value="0">Unpinned only</option>
+            </select>
             <button class="btn btn-sm" id="btn-refresh">Refresh</button>
             <button class="btn btn-sm" id="btn-export-json" title="Download current filtered events as JSON">Export JSON</button>
             <button class="btn btn-sm" id="btn-export-csv" title="Download current filtered events as CSV">Export CSV</button>
@@ -369,6 +380,8 @@ async function loadEvents() {
   if (q) qs.set('q', q);
   if (method) qs.set('method', method);
   if (statusMin !== '') qs.set('statusMin', statusMin);
+  const pinnedF = ($('filter-pinned') && $('filter-pinned').value) || '';
+  if (pinnedF) qs.set('pinned', pinnedF);
   const data = await api(`/api/inboxes/${state.activeInboxId}/events?${qs.toString()}`);
   const tbody = $('events-body');
   const empty = $('empty-state');
@@ -379,11 +392,11 @@ async function loadEvents() {
   }
   empty.classList.add('hidden');
   tbody.innerHTML = data.events.map((e) => `
-    <tr data-id="${e.id}">
+    <tr data-id="${e.id}" data-pinned="${e.pinned ? '1' : '0'}">
       <td>${new Date(e.receivedAt).toLocaleString()}</td>
-      <td><code>${e.method}</code>${e.respondedCustom ? ` <span class="muted" title="Hookkeep answered with your custom response">↩ ${escapeHtml(String(e.respondedStatus))}</span>` : ''}${e.signature ? ` <span title="${escapeHtml(`${e.signature.scheme}: ${e.signature.reason}`)}" style="color:${e.signature.valid ? 'var(--ok, #3d9a5f)' : 'var(--danger)'}">${e.signature.valid ? '✓ sig' : '✗ sig'}</span>` : ''}</td>
+      <td>${e.pinned ? `<span title="${escapeHtml(e.note ? `Pinned — ${e.note}` : 'Pinned (never trimmed)')}">📌</span> ` : ''}<code>${e.method}</code>${e.respondedCustom ? ` <span class="muted" title="Hookkeep answered with your custom response">↩ ${escapeHtml(String(e.respondedStatus))}</span>` : ''}${e.signature ? ` <span title="${escapeHtml(`${e.signature.scheme}: ${e.signature.reason}`)}" style="color:${e.signature.valid ? 'var(--ok, #3d9a5f)' : 'var(--danger)'}">${e.signature.valid ? '✓ sig' : '✗ sig'}</span>` : ''}</td>
       <td>${e.statusGuess ? `<code>${escapeHtml(e.statusGuess)}</code>` : '—'}</td>
-      <td class="muted">${escapeHtml(e.preview || '')}</td>
+      <td class="muted">${e.note ? `<em>${escapeHtml(e.note)}</em> · ` : ''}${escapeHtml(e.preview || '')}</td>
     </tr>`).join('');
   tbody.querySelectorAll('tr[data-id]').forEach((tr) => {
     tr.onclick = () => openEvent(tr.dataset.id);
@@ -459,6 +472,7 @@ async function openEvent(id) {
   const titleBits = [`${data.event.method} · ${data.event.id}`];
   if (data.event.respondedCustom) titleBits.push(`answered HTTP ${data.event.respondedStatus} (custom response)`);
   $('ev-title').textContent = titleBits.join(' · ');
+  renderPinState(data.event);
   const sigEl = $('signature-status');
   if (sigEl) {
     const sg = data.event.signature;
@@ -497,6 +511,45 @@ async function openEvent(id) {
     }
   }
 }
+
+function renderPinState(ev) {
+  const btn = $('btn-pin');
+  if (!btn || !ev) return;
+  btn.textContent = ev.pinned ? '📌 Unpin' : '📌 Pin';
+  $('ev-note').value = ev.note || '';
+  const st = $('pin-status');
+  if (ev.pinned) {
+    st.hidden = false;
+    st.textContent = `Pinned${ev.pinnedAt ? ' ' + new Date(ev.pinnedAt).toLocaleString() : ''} — kept past the ${(state.workspace && state.workspace.limits && state.workspace.limits.maxEventsKeep) || ''}-event window and skipped by Delete filtered.`;
+  } else {
+    st.hidden = true;
+    st.textContent = '';
+  }
+}
+
+async function patchCurrentEvent(patch, okMsg) {
+  if (!state.currentEvent) return;
+  try {
+    const data = await api(`/api/events/${state.currentEvent.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+    state.currentEvent = data.event;
+    renderPinState(data.event);
+    toast(okMsg(data));
+  } catch (e) {
+    toast(humanError(e), true);
+  }
+}
+if ($('btn-pin'))
+  $('btn-pin').onclick = () =>
+    patchCurrentEvent({ pinned: !(state.currentEvent && state.currentEvent.pinned) }, (d) =>
+      d.event.pinned ? `Pinned (${d.pinnedCount}/${d.pinLimit} in this inbox)` : 'Unpinned'
+    );
+if ($('btn-save-note'))
+  $('btn-save-note').onclick = () =>
+    patchCurrentEvent({ note: $('ev-note').value }, (d) => (d.event.note ? 'Note saved' : 'Note cleared'));
+if ($('filter-pinned')) $('filter-pinned').onchange = () => loadEvents();
 
 $('btn-back').onclick = () => {
   $('detail-view').classList.add('hidden');
@@ -606,6 +659,8 @@ async function downloadFilteredExport(format) {
   if (q) qs.set('q', q);
   if (method) qs.set('method', method);
   if (statusMin !== '') qs.set('statusMin', statusMin);
+  const pinnedF = ($('filter-pinned') && $('filter-pinned').value) || '';
+  if (pinnedF) qs.set('pinned', pinnedF);
   try {
     const res = await fetch(`/api/inboxes/${state.activeInboxId}/events/export?${qs.toString()}`, {
       headers: { 'x-hookkeep-token': token },
@@ -684,8 +739,13 @@ async function deleteFilteredEvents() {
     toast('No filtered events to delete.', true);
     return;
   }
-  const n = Math.min(count, 50);
-  if (!confirm(`Delete ${n} filtered event${n === 1 ? '' : 's'}? This cannot be undone.`)) return;
+  const pinnedShown = document.querySelectorAll('#events-body tr[data-pinned="1"]').length;
+  const n = Math.min(count - pinnedShown, 50);
+  if (n <= 0) {
+    toast('Only pinned events match — unpin them first (pinned events are never bulk-deleted).', true);
+    return;
+  }
+  if (!confirm(`Delete ${n} filtered event${n === 1 ? '' : 's'}? Pinned events are skipped. This cannot be undone.`)) return;
   const body = { confirm: true };
   if (q) body.q = q;
   if (method) body.method = method;

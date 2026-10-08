@@ -201,7 +201,8 @@ app.get('/api/inboxes/:id/events/export', (c) => {
     statusMinRaw === undefined || statusMinRaw === '' ? null : Number(statusMinRaw);
   const limit = Number(c.req.query('limit') || 50);
   const sig = c.req.query('sig') || '';
-  const hit = db.exportEvents(ws, inboxId, { q, method, statusMin, limit, sig });
+  const pinned = c.req.query('pinned') || '';
+  const hit = db.exportEvents(ws, inboxId, { q, method, statusMin, limit, sig, pinned });
   if (!hit) return c.json({ error: 'not_found' }, 404);
   const day = new Date().toISOString().slice(0, 10);
   const filename = `hookkeep-events-${inboxId}-${day}.${format}`;
@@ -210,6 +211,7 @@ app.get('/api/inboxes/:id/events/export', (c) => {
     method: method || undefined,
     statusMin: statusMin == null || Number.isNaN(statusMin) ? undefined : statusMin,
     sig: sig || undefined,
+    pinned: pinned || undefined,
     limit,
   };
   if (format === 'csv') {
@@ -283,6 +285,7 @@ app.post('/api/inboxes/:id/events/delete-bulk', async (c) => {
     statusMin,
     limit,
     confirm: body.confirm === true,
+    includePinned: body.includePinned === true,
   });
   if (!result) return c.json({ error: 'not_found' }, 404);
   if (result.error === 'confirm_required') {
@@ -310,6 +313,7 @@ app.get('/api/inboxes/:id/events', (c) => {
     method,
     statusMin,
     sig: c.req.query('sig') || '',
+    pinned: c.req.query('pinned') || '',
     limit: Number(c.req.query('limit') || 50),
   });
   if (!events) return c.json({ error: 'not_found' }, 404);
@@ -332,6 +336,20 @@ app.get('/api/events/:id', (c) => {
   const ev = db.getEvent(ws, c.req.param('id'));
   if (!ev) return c.json({ error: 'not_found' }, 404);
   return c.json({ event: ev });
+});
+
+// Pin an event (exempt from the keep-window trim + bulk delete) and/or attach a short note
+app.patch('/api/events/:id', async (c) => {
+  const ws = requireWs(c);
+  if (!ws) return c.json({ error: 'unauthorized' }, 401);
+  const body = await c.req.json().catch(() => null);
+  const result = db.updateEventPin(ws, c.req.param('id'), body);
+  if (!result) return c.json({ error: 'not_found' }, 404);
+  if (!result.ok) {
+    const { ok, ...rest } = result;
+    return c.json(rest, result.error === 'pin_limit' ? 409 : 400);
+  }
+  return c.json(result, 200);
 });
 
 app.post('/api/events/:id/replay', async (c) => {

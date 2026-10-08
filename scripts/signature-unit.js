@@ -188,8 +188,8 @@ assert.equal(detail.event.signature.reason, 'mismatch');
 assert.ok(!JSON.stringify(detail).includes(ghSecret), 'secret leaked in event detail');
 const csv = await (await call(`/api/inboxes/${inboxId}/events/export?format=csv`, { headers: auth })).text();
 const csvLines = csv.trim().split('\n');
-assert.ok(csvLines[0].endsWith(',signatureValid,signatureReason'), csvLines[0]);
-assert.ok(csvLines.some((l) => l.endsWith(',false,mismatch')) && csvLines.some((l) => l.endsWith(',true,ok')));
+assert.ok(csvLines[0].includes(',signatureValid,signatureReason'), csvLines[0]);
+assert.ok(csvLines.some((l) => l.includes(',false,mismatch,')) && csvLines.some((l) => l.includes(',true,ok,')));
 const ej = await (await call(`/api/inboxes/${inboxId}/events/export?format=json`, { headers: auth })).json();
 assert.ok(ej.events.every((e) => e.signature && typeof e.signature.valid === 'boolean'));
 
