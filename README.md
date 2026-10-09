@@ -95,12 +95,23 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
   free 5, Pro 100 (`limits.maxPinned`); over the limit → 409 `pin_limit`. Bad input → 400 `bad_pinned` / `bad_note` / `empty_patch`
   (nothing applied). List/export rows carry `pinned` + `note`; CSV adds trailing `pinned,note`. Shared `src/event-pin.js` (Node + Workers;
   Workers tracks ids in KV `pins:<inboxId>`). Dashboard: **📌 Pin** + note field on the event detail, 📌 badge in the list, *Pinned only* filter.
+- **Diff two events** — `GET /api/events/:id/diff?against=<eventId>&ignore=<paths>&headers=all` answers "this delivery broke my flow,
+  the one before it didn't — what changed?". Baseline = `against` (any event in your workspace, e.g. a pinned known-good capture or one
+  from another inbox) or, when omitted, the **previous event in the same inbox**. JSON bodies diff structurally with dot/`[index]` paths
+  (`added` / `removed` / `changed` / `type` — e.g. `amount` 900 → "900" number→string); other bodies get a line diff. Headers compare
+  case-insensitively with per-delivery noise (date, content-length, request ids, CDN hops, Stripe/GitHub/Shopify/Slack/Svix signatures)
+  hidden unless `headers=all`; meta diff covers method / contentType / statusGuess / size / respondedStatus / signatureValid.
+  `ignore` = up to 20 comma-separated paths (a path hides its children; `*` matches one segment: `data.items[*].id`). Returns
+  `{ base, target, identical, summary, body: { mode, changes, truncated, ignoredChanges }, headers: { changes, volatileSkipped }, meta, baselineMode }`
+  (first 200 changes, values previewed to 200 chars). Errors: 404 `no_baseline` / `against_not_found` / `not_found`, 400 `same_event` /
+  `bad_ignore`. Read-only, free tier OK. Shared `src/event-diff.js` (Node + Workers). Dashboard: event detail **⇄ Compare with another
+  event** (previous / pinned / recent picker, ignore paths, all-headers toggle, colored +/−/~ list).
 - `GET /api/inboxes/:id/events?q=&method=&statusMin=&sig=&pinned=` (text / HTTP method / status ≥ N / signature `valid|invalid|unchecked` / `pinned=1|0`)
 - `GET /api/inboxes/:id/events/export?format=json|csv&q=&method=&statusMin=&sig=&pinned=&limit=` → bulk download of the **current filtered** set (same filters/cap as list; free tier OK; JSON rows carry `signature`, CSV adds `signatureValid,signatureReason,pinned,note`)
 - `POST /api/inboxes/:id/events/replay-bulk` `{ targetUrl?, q?, method?, statusMin?, limit? }` → serially replay the **current filtered** set via the same forward path (default/hard max 50; free tier OK). Target = `targetUrl` else inbox `forwardUrl`; neither → 400 `no_forward_url`.
 - `POST /api/inboxes/:id/events/delete-bulk` `{ q?, method?, statusMin?, limit?, confirm: true, includePinned? }` → delete the **current filtered** set (same filters; default/hard max 50; free tier OK; pinned events skipped unless `includePinned: true`). Missing `confirm: true` → 400 `confirm_required`. Returns `{ ok, inboxId, filters, deleted, ids }`; inbox `eventCount` decremented.
 - `GET /api/inboxes/:id/alerts?limit=20` → recent Pro alert records
-- `GET /api/events/:id` · `PATCH /api/events/:id` (pin/note)
+- `GET /api/events/:id` · `PATCH /api/events/:id` (pin/note) · `GET /api/events/:id/diff` (compare)
 - `POST /api/events/:id/replay` `{ "targetUrl?: string" }`
 - **Auto-forward on ingest** — when an inbox has `forwardUrl` + `autoForward: true`, each
   captured request is POSTed to `forwardUrl` (same headers/body as replay, ~8s timeout).

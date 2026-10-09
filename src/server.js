@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as db from './db.js';
 import { verifySignature } from './signature.js';
+import { diffOptionsFromQuery } from './event-diff.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -336,6 +337,24 @@ app.get('/api/events/:id', (c) => {
   const ev = db.getEvent(ws, c.req.param('id'));
   if (!ev) return c.json({ error: 'not_found' }, 404);
   return c.json({ event: ev });
+});
+
+// Diff an event against ?against=<eventId> (or the previous event in the same inbox)
+app.get('/api/events/:id/diff', (c) => {
+  const ws = requireWs(c);
+  if (!ws) return c.json({ error: 'unauthorized' }, 401);
+  const opts = diffOptionsFromQuery((k) => c.req.query(k));
+  if (!opts.ok) {
+    const { ok, ...rest } = opts;
+    return c.json(rest, 400);
+  }
+  const result = db.diffEvent(ws, c.req.param('id'), opts);
+  if (!result) return c.json({ error: 'not_found' }, 404);
+  if (!result.ok) {
+    const { ok, ...rest } = result;
+    return c.json(rest, result.error === 'same_event' ? 400 : 404);
+  }
+  return c.json(result);
 });
 
 // Pin an event (exempt from the keep-window trim + bulk delete) and/or attach a short note

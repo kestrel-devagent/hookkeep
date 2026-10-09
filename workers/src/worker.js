@@ -25,6 +25,7 @@ import {
   publicPinFields,
   pinLimitFor,
 } from '../../src/event-pin.js';
+import { diffEvents, diffOptionsFromQuery } from '../../src/event-diff.js';
 
 const TIERS = {
   free: { name: 'Free', maxInboxes: 1, maxEventsKeep: 50, maxEventsMonth: 500, alerts: false, maxPinned: 5 },
@@ -1083,7 +1084,7 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
         return json({ alerts });
       }
 
-      const eventMatch = path.match(/^\/api\/events\/([^/]+)(\/replay)?$/);
+      const eventMatch = path.match(/^\/api\/events\/([^/]+)(\/replay|\/diff)?$/);
       if (eventMatch) {
         const ws = await requireWs();
         if (!ws) return json({ error: 'unauthorized' }, 401);
@@ -1102,6 +1103,49 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           }
           return null;
         };
+
+        // Diff vs ?against=<eventId> or the previous event in the same inbox (Node parity)
+        if (eventMatch[2] === '/diff' && request.method === 'GET') {
+          const opts = diffOptionsFromQuery((k) => url.searchParams.get(k));
+          if (!opts.ok) {
+            const { ok, ...rest } = opts;
+            return json(rest, 400);
+          }
+          const found = await findEvent();
+          if (!found) return json({ error: 'not_found' }, 404);
+          let base = null;
+          if (opts.against) {
+            if (opts.against === eventId)
+              return json({ error: 'same_event', message: 'Pick a different event to compare against' }, 400);
+            const other = await (async () => {
+              for (const iid of await listInboxIds(kv, ws.id)) {
+                const listed = await kv.list({ prefix: `evt:${iid}:` });
+                for (const k of listed.keys) {
+                  if (k.name.includes(opts.against)) {
+                    const ev = await kv.get(k.name, 'json');
+                    if (ev && ev.id === opts.against) return ev;
+                  }
+                }
+              }
+              return null;
+            })();
+            if (!other)
+              return json({ error: 'against_not_found', message: 'Baseline event not found (it may have been trimmed)' }, 404);
+            base = other;
+          } else {
+            // keys sort newest-first, so the previous capture is the next key after the target's
+            const listed = await kv.list({ prefix: `evt:${found.inboxId}:` });
+            const idx = listed.keys.findIndex((k) => k.name === found.key);
+            const prevKey = idx >= 0 ? listed.keys[idx + 1] : null;
+            if (prevKey) base = await kv.get(prevKey.name, 'json');
+            if (!base)
+              return json({ error: 'no_baseline', message: 'No earlier event in this inbox to compare against' }, 404);
+          }
+          return json({
+            ...diffEvents(base, found.ev, { ignore: opts.ignore, allHeaders: opts.allHeaders }),
+            baselineMode: opts.against ? 'against' : 'previous',
+          });
+        }
 
         if (!eventMatch[2] && request.method === 'GET') {
           const found = await findEvent();
@@ -1135,7 +1179,7 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           return json({ ok: true, event: ev, pinnedCount: nextPins.length, pinLimit: limit });
         }
 
-        if (eventMatch[2] && request.method === 'POST') {
+        if (eventMatch[2] === '/replay' && request.method === 'POST') {
           const body = await bodyJson();
           const found = await findEvent();
           if (!found) return json({ ok: false, error: 'not_found' }, 404);

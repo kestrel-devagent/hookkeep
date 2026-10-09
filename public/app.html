@@ -130,6 +130,18 @@
             <summary class="muted" style="cursor:pointer;font-size:0.85rem">curl replay snippet</summary>
             <pre id="ev-curl" style="margin-top:0.5rem;white-space:pre-wrap;word-break:break-all"></pre>
           </details>
+          <details id="diff-panel" class="curl-panel" style="margin:0.75rem 0">
+            <summary class="muted" style="cursor:pointer;font-size:0.85rem" title="What changed between this delivery and another one?">⇄ Compare with another event</summary>
+            <div class="row" style="margin-top:0.5rem;gap:0.5rem;align-items:center;flex-wrap:wrap">
+              <select id="diff-against" aria-label="Compare against" style="max-width:20rem">
+                <option value="">Previous event in this inbox</option>
+              </select>
+              <input id="diff-ignore" type="text" placeholder="Ignore paths (e.g. id,created,data.object.id)" style="flex:1;min-width:12rem" />
+              <label class="muted" style="font-size:0.8rem;white-space:nowrap" title="Include per-delivery headers like date, signatures, request ids"><input type="checkbox" id="diff-all-headers" /> all headers</label>
+              <button class="btn btn-sm" id="btn-diff">Compare</button>
+            </div>
+            <div id="diff-out" style="margin-top:0.5rem;font-size:0.85rem"></div>
+          </details>
           <p id="replay-msg" class="msg" hidden></p>
           <p id="auto-forward-status" class="muted" style="font-size:0.85rem;margin:0.5rem 0" hidden></p>
           <p id="signature-status" class="muted" style="font-size:0.85rem;margin:0.5rem 0" hidden></p>
@@ -236,7 +248,7 @@ const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 const savedToken = localStorage.getItem('hookkeep_token') || '';
 let token = params.get('token') || savedToken;
-let state = { workspace: null, inboxes: [], activeInboxId: null, currentEvent: null };
+let state = { workspace: null, inboxes: [], activeInboxId: null, currentEvent: null, lastEvents: [] };
 
 const ERRORS = {
   no_forward_url: 'Set a Forward URL (your n8n webhook) first — see the sidebar.',
@@ -383,6 +395,7 @@ async function loadEvents() {
   const pinnedF = ($('filter-pinned') && $('filter-pinned').value) || '';
   if (pinnedF) qs.set('pinned', pinnedF);
   const data = await api(`/api/inboxes/${state.activeInboxId}/events?${qs.toString()}`);
+  state.lastEvents = data.events || [];
   const tbody = $('events-body');
   const empty = $('empty-state');
   if (!data.events.length) {
@@ -468,6 +481,7 @@ async function openEvent(id) {
   $('ev-body').textContent = body;
   $('ev-curl').textContent = buildCurlSnippet(data.event);
   $('curl-panel').open = false;
+  resetDiffPanel(data.event);
   $('replay-msg').hidden = true;
   const titleBits = [`${data.event.method} · ${data.event.id}`];
   if (data.event.respondedCustom) titleBits.push(`answered HTTP ${data.event.respondedStatus} (custom response)`);
@@ -511,6 +525,77 @@ async function openEvent(id) {
     }
   }
 }
+
+function resetDiffPanel(ev) {
+  const sel = $('diff-against');
+  if (!sel || !ev) return;
+  const others = (state.lastEvents || []).filter((e) => e.id !== ev.id);
+  others.sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+  sel.innerHTML =
+    '<option value="">Previous event in this inbox</option>' +
+    others
+      .slice(0, 60)
+      .map((e) => {
+        const when = e.receivedAt ? new Date(e.receivedAt).toLocaleString() : '';
+        const label = `${e.pinned ? '📌 ' : ''}${e.method} · ${when}${e.note ? ' — ' + e.note : ''} · ${e.id}`;
+        return `<option value="${escapeHtml(e.id)}">${escapeHtml(label.slice(0, 120))}</option>`;
+      })
+      .join('');
+  $('diff-out').innerHTML = '';
+  $('diff-panel').open = false;
+}
+
+function diffVal(v) {
+  if (v === undefined) return '';
+  return escapeHtml(JSON.stringify(v));
+}
+
+function renderDiff(d) {
+  const out = $('diff-out');
+  const plus = 'color:var(--ok, #3d9a5f)';
+  const minus = 'color:var(--danger)';
+  const tilde = 'color:#e0b85a';
+  const rows = [];
+  rows.push(`<p class="muted" style="margin:0 0 0.4rem">Baseline <code>${escapeHtml(d.base.id)}</code>${d.base.receivedAt ? ' (' + escapeHtml(new Date(d.base.receivedAt).toLocaleString()) + ')' : ''} → this event. ` +
+    (d.identical ? '<strong>No differences.</strong>' :
+      `Body +${d.summary.bodyAdded} −${d.summary.bodyRemoved} ~${d.summary.bodyChanged} · headers ${d.summary.headersChanged} · meta ${d.summary.metaChanged}`) +
+    (d.body.ignoredChanges ? ` · ${d.body.ignoredChanges} ignored` : '') +
+    (d.headers.volatileSkipped ? ` · ${d.headers.volatileSkipped} volatile header(s) hidden` : '') + '</p>');
+  const line = (sym, style, text) => `<div style="font-family:ui-monospace,monospace;white-space:pre-wrap;word-break:break-all"><span style="${style}">${sym}</span> ${text}</div>`;
+  for (const m of d.meta) rows.push(line('~', tilde, `<em>${escapeHtml(m.field)}</em>: ${diffVal(m.before)} → ${diffVal(m.after)}`));
+  for (const h of d.headers.changes) {
+    if (h.kind === 'added') rows.push(line('+', plus, `header <code>${escapeHtml(h.name)}</code>: ${diffVal(h.after)}`));
+    else if (h.kind === 'removed') rows.push(line('−', minus, `header <code>${escapeHtml(h.name)}</code>: ${diffVal(h.before)}`));
+    else rows.push(line('~', tilde, `header <code>${escapeHtml(h.name)}</code>: ${diffVal(h.before)} → ${diffVal(h.after)}`));
+  }
+  for (const c of d.body.changes) {
+    const where = d.body.mode === 'json' ? `<code>${escapeHtml(c.path)}</code>` : `line ${c.line}`;
+    if (d.body.mode !== 'json') rows.push(line(c.kind === 'added' ? '+' : '−', c.kind === 'added' ? plus : minus, `${where}: ${escapeHtml(c.text)}`));
+    else if (c.kind === 'added') rows.push(line('+', plus, `${where}: ${diffVal(c.after)}`));
+    else if (c.kind === 'removed') rows.push(line('−', minus, `${where}: ${diffVal(c.before)}`));
+    else if (c.kind === 'type') rows.push(line('~', tilde, `${where}: ${diffVal(c.before)} (${escapeHtml(c.beforeType)}) → ${diffVal(c.after)} (${escapeHtml(c.afterType)})`));
+    else rows.push(line('~', tilde, `${where}: ${diffVal(c.before)} → ${diffVal(c.after)}`));
+  }
+  if (d.body.truncated) rows.push('<p class="muted">… more changes not shown (first 200).</p>');
+  out.innerHTML = rows.join('');
+}
+
+async function runDiff() {
+  if (!state.currentEvent) return;
+  const qs = new URLSearchParams();
+  const against = $('diff-against').value;
+  const ignore = $('diff-ignore').value.trim();
+  if (against) qs.set('against', against);
+  if (ignore) qs.set('ignore', ignore);
+  if ($('diff-all-headers').checked) qs.set('headers', 'all');
+  try {
+    const d = await api(`/api/events/${state.currentEvent.id}/diff?${qs.toString()}`);
+    renderDiff(d);
+  } catch (e) {
+    $('diff-out').innerHTML = `<p class="muted">${escapeHtml(humanError(e))}</p>`;
+  }
+}
+if ($('btn-diff')) $('btn-diff').onclick = runDiff;
 
 function renderPinState(ev) {
   const btn = $('btn-pin');

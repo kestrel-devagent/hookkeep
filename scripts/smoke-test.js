@@ -1,5 +1,5 @@
 /** Local smoke test against a running server (default http://127.0.0.1:8787)
- * Steps: create → ingest → list → export → forwardUrl → replay → replay-bulk → delete-bulk → auto-forward → demo unlock → pro alerts → free tier → custom response → signature check
+ * Steps: create → ingest → list → export → forwardUrl → replay → replay-bulk → delete-bulk → auto-forward → demo unlock → pro alerts → free tier → custom response → signature check → event pin → event diff
  */
 import http from 'node:http';
 import { createHmac } from 'node:crypto';
@@ -581,6 +581,42 @@ async function main() {
     const unp = await pPatch(firstId, { pinned: false, note: null }).then((r) => r.json());
     check(unp.ok && !unp.event.pinned && !unp.event.note, 'unpin/clear note');
     console.log('pin: 400 bad / 401 unauth / pinned survives 50-event trim / ?pinned=1 / csv / bulk delete skips pinned / unpin');
+  }
+
+  step('event diff');
+  {
+    const dc = await fetch(`${BASE}/api/workspace`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ label: 'diff-smoke' }),
+    }).then((r) => r.json());
+    const dAuth = { 'x-hookkeep-token': dc.ownerToken };
+    const dHook = async (obj, headers = {}) => {
+      const r = await fetch(`${BASE}/hook/${dc.inbox.id}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify(obj),
+      });
+      await new Promise((res) => setTimeout(res, 3));
+      return r.headers.get('x-hookkeep-event-id') || (await r.json()).id;
+    };
+    const d1 = await dHook({ id: 'evt_a', type: 'invoice.paid', amount: 900 }, { 'x-api-version': '2024-06-20' });
+    const d2 = await dHook({ id: 'evt_b', type: 'invoice.paid', amount: '900', coupon: 'FALL' }, { 'x-api-version': '2026-09-30' });
+    const dGet = (id, qs = '') => fetch(`${BASE}/api/events/${id}/diff${qs}`, { headers: dAuth });
+    check((await fetch(`${BASE}/api/events/${d2}/diff`)).status === 401, 'diff unauth should 401');
+    const nb = await dGet(d1);
+    check(nb.status === 404 && (await nb.json()).error === 'no_baseline', 'first event should have no_baseline');
+    const dd = await dGet(d2, '?ignore=id').then((r) => r.json());
+    check(dd.ok && dd.base?.id === d1 && dd.baselineMode === 'previous', `diff baseline ${JSON.stringify(dd.base)}`);
+    const kinds = Object.fromEntries((dd.body?.changes || []).map((c) => [c.path, c.kind]));
+    check(kinds.amount === 'type' && kinds.coupon === 'added' && !kinds.id, `diff body ${JSON.stringify(dd.body)}`);
+    check(dd.headers?.changes?.some((h) => h.name === 'x-api-version' && h.kind === 'changed'), 'diff headers');
+    check(dd.body.ignoredChanges === 1, 'ignore=id not applied');
+    const self = await dGet(d2, `?against=${d2}`);
+    check(self.status === 400, 'same_event should 400');
+    const ag = await dGet(d1, `?against=${d2}`).then((r) => r.json());
+    check(ag.baselineMode === 'against' && ag.body.changes.some((c) => c.path === 'coupon' && c.kind === 'removed'), 'against diff');
+    console.log('diff: 401 / no_baseline / previous baseline / type+added / ignore / header version change / against / same_event 400');
   }
 
   step('waitlist');

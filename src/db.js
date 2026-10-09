@@ -16,6 +16,7 @@ import {
   publicPinFields,
   pinLimitFor,
 } from './event-pin.js';
+import { diffEvents, previousEvent } from './event-diff.js';
 
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 12);
 const id16 = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 16);
@@ -837,6 +838,32 @@ export function updateEventPin(ws, eventId, body) {
   if (!res.ok) return res;
   write(db);
   return { ok: true, event: ev, pinnedCount: pinnedCount + (ev.pinned ? 1 : 0), pinLimit: pinLimitFor(live.tier) };
+}
+
+/**
+ * Diff an event against a baseline: opts.against (any event in the same workspace) or, when blank,
+ * the previous event in the same inbox. Returns null (event not found) or the diffEvents result /
+ * { ok:false, error } — against_not_found · no_baseline · same_event.
+ */
+export function diffEvent(ws, eventId, { against = '', ignore = [], allHeaders = false } = {}) {
+  const db = read();
+  const owned = (e) => {
+    if (!e) return false;
+    const ib = db.inboxes[e.inboxId];
+    return Boolean(ib && ib.workspaceId === ws.id);
+  };
+  const target = db.events[eventId];
+  if (!owned(target)) return null;
+  let base;
+  if (against) {
+    if (against === eventId) return { ok: false, error: 'same_event', message: 'Pick a different event to compare against' };
+    base = db.events[against];
+    if (!owned(base)) return { ok: false, error: 'against_not_found', message: 'Baseline event not found (it may have been trimmed)' };
+  } else {
+    base = previousEvent(Object.values(db.events).filter((e) => e.inboxId === target.inboxId), target);
+    if (!base) return { ok: false, error: 'no_baseline', message: 'No earlier event in this inbox to compare against' };
+  }
+  return { ...diffEvents(base, target, { ignore, allHeaders }), baselineMode: against ? 'against' : 'previous' };
 }
 
 export function addWaitlist({ email, note = '' }) {
