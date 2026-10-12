@@ -9,6 +9,13 @@ import { customAlphabet } from 'nanoid';
 import { normalizeResponsePatch, publicResponseConfig, buildCustomResponse } from './custom-response.js';
 import { normalizeSignaturePatch, publicSignatureConfig } from './signature.js';
 import {
+  normalizeDedupePatch,
+  publicDedupeConfig,
+  rememberDedupe,
+  lookupDedupe,
+  forgetDedupeForEvent,
+} from './dedupe.js';
+import {
   normalizePinPatch,
   applyPinPatch,
   pinnedFilterMatch,
@@ -105,6 +112,10 @@ function makeInbox(db, ws, { name = 'Inbox' } = {}) {
     signingScheme: 'none',
     signingSecret: '',
     signingHeader: '',
+    dedupeMode: 'none',
+    dedupeHeader: 'idempotency-key',
+    dedupeMap: {},
+    dedupeOrder: [],
     createdAt: new Date().toISOString(),
     eventCount: 0,
   };
@@ -199,8 +210,15 @@ export function updateInbox(ws, inboxId, patch) {
     err.code = sp.error;
     throw err;
   }
+  const dp = normalizeDedupePatch(patch);
+  if (!dp.ok) {
+    const err = new Error(dp.message);
+    err.code = dp.error;
+    throw err;
+  }
   Object.assign(inbox, rp.patch);
   Object.assign(inbox, sp.patch);
+  Object.assign(inbox, dp.patch);
   if (patch.name != null) inbox.name = String(patch.name).slice(0, 80);
   if (patch.forwardUrl != null) inbox.forwardUrl = String(patch.forwardUrl).slice(0, 500);
   if (patch.autoForward != null) inbox.autoForward = Boolean(patch.autoForward);
@@ -217,7 +235,7 @@ export function getInbox(inboxId) {
   return db.inboxes[inboxId] || null;
 }
 
-export function ingestEvent(inboxId, { method, headers, bodyText, contentType, signature = null, size = null }) {
+export function ingestEvent(inboxId, { method, headers, bodyText, contentType, signature = null, size = null, dedupeKey = null }) {
   const db = read();
   const inbox = db.inboxes[inboxId];
   if (!inbox) return { ok: false, error: 'not_found' };
@@ -225,6 +243,24 @@ export function ingestEvent(inboxId, { method, headers, bodyText, contentType, s
   if (!ws) return { ok: false, error: 'workspace_missing' };
   rolloverMonth(ws);
   const limits = TIERS[ws.tier] || TIERS.free;
+
+  // Dedupe hit: reuse prior capture — no new event, no count bump, no alerts/auto-forward
+  if (dedupeKey) {
+    const priorId = lookupDedupe(inbox, dedupeKey);
+    if (priorId && db.events[priorId] && db.events[priorId].inboxId === inboxId) {
+      const prior = db.events[priorId];
+      const customResponse = buildCustomResponse(inbox, prior);
+      return {
+        ok: true,
+        eventId: prior.id,
+        deduped: true,
+        alert: null,
+        overMonth: ws.eventsThisMonth > limits.maxEventsMonth,
+        autoForwardTarget: null,
+        customResponse,
+      };
+    }
+  }
 
   // Soft monthly cap: still accept but mark over_quota for free after keep window
   const eventId = 'ev_' + id16();
@@ -254,6 +290,7 @@ export function ingestEvent(inboxId, { method, headers, bodyText, contentType, s
   };
   // Signature check result (computed by the caller over the raw body bytes; capture is stored regardless)
   if (signature) event.signature = signature;
+  if (dedupeKey) event.dedupeKey = String(dedupeKey).slice(0, 300);
 
   // Per-inbox custom ingest response (status/body/content-type) — free tier OK
   const customResponse = buildCustomResponse(inbox, event);
@@ -264,12 +301,15 @@ export function ingestEvent(inboxId, { method, headers, bodyText, contentType, s
   inbox.eventCount = (inbox.eventCount || 0) + 1;
   ws.eventsThisMonth = (ws.eventsThisMonth || 0) + 1;
 
+  if (dedupeKey) rememberDedupe(inbox, dedupeKey, eventId);
+
   // Trim to keep window (per inbox) — pinned events are exempt and don't count toward it
   const keep = limits.maxEventsKeep;
   const inboxEvents = Object.values(db.events)
     .filter((e) => e.inboxId === inboxId)
     .sort((a, b) => (a.receivedAt < b.receivedAt ? 1 : -1));
   for (const old of rowsToTrim(inboxEvents, keep)) {
+    forgetDedupeForEvent(inbox, old.id);
     delete db.events[old.id];
   }
 
@@ -298,6 +338,7 @@ export function ingestEvent(inboxId, { method, headers, bodyText, contentType, s
   return {
     ok: true,
     eventId,
+    deduped: false,
     alert,
     overMonth: ws.eventsThisMonth > limits.maxEventsMonth,
     autoForwardTarget,
@@ -525,6 +566,7 @@ export function toExportEvent(e) {
   };
   if (e.respondedStatus != null) out.respondedStatus = e.respondedStatus;
   if (e.signature && typeof e.signature === 'object') out.signature = e.signature;
+  if (e.dedupeKey) out.dedupeKey = e.dedupeKey;
   if (e.pinned) out.pinned = true;
   if (e.note) out.note = e.note;
   if (e.path) out.path = e.path;
@@ -560,6 +602,7 @@ export function eventsToCsv(events) {
     'signatureReason',
     'pinned',
     'note',
+    'dedupeKey',
   ];
   const lines = [header.join(',')];
   for (const e of events) {
@@ -585,6 +628,7 @@ export function eventsToCsv(events) {
         escapeCsvField(sg ? sg.reason || '' : ''),
         escapeCsvField(e.pinned ? 'true' : ''),
         escapeCsvField(e.note || ''),
+        escapeCsvField(e.dedupeKey || ''),
       ].join(',')
     );
   }
@@ -809,6 +853,7 @@ export function deleteEventsBulk(
   const ids = [];
   for (const row of hit.rows) {
     if (db.events[row.id] && db.events[row.id].inboxId === inboxId) {
+      if (inbox) forgetDedupeForEvent(inbox, row.id);
       delete db.events[row.id];
       ids.push(row.id);
     }
@@ -957,6 +1002,7 @@ function publicInbox(inbox) {
     notifyWebhookUrl: inbox.notifyWebhookUrl || '',
     ...publicResponseConfig(inbox),
     ...publicSignatureConfig(inbox),
+    ...publicDedupeConfig(inbox),
     eventCount: inbox.eventCount || 0,
     createdAt: inbox.createdAt,
   };
@@ -975,6 +1021,7 @@ function summarizeEvent(e) {
     respondedStatus: e.respondedStatus ?? 200,
     respondedCustom: Boolean(e.respondedCustom),
     signature: e.signature || null,
+    dedupeKey: e.dedupeKey || null,
     ...publicPinFields(e),
   };
 }

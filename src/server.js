@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as db from './db.js';
 import { verifySignature } from './signature.js';
+import { computeDedupeKey } from './dedupe.js';
 import { diffOptionsFromQuery } from './event-diff.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -178,7 +179,7 @@ app.patch('/api/inboxes/:id', async (c) => {
   try {
     inbox = db.updateInbox(ws, c.req.param('id'), body);
   } catch (e) {
-    if (['bad_response_status', 'bad_signing_scheme', 'bad_signing_secret', 'bad_signing_header'].includes(e.code)) {
+    if (['bad_response_status', 'bad_signing_scheme', 'bad_signing_secret', 'bad_signing_header', 'bad_dedupe_mode', 'bad_dedupe_header'].includes(e.code)) {
       return c.json({ error: e.code, message: e.message }, 400);
     }
     throw e;
@@ -431,6 +432,13 @@ async function ingest(c) {
   // Per-inbox signature check (stripe / github / hmac-sha256). Result is recorded on the
   // event only — capture is always stored and the ingest response is unchanged.
   const signature = await verifySignature(inbox, { headers, rawBody });
+  // Dedupe key after signature verify (same raw bytes) — hit reuses the prior capture.
+  const dedupe = await computeDedupeKey({
+    mode: inbox.dedupeMode,
+    headerName: inbox.dedupeHeader,
+    headers,
+    bodyText: rawBody,
+  });
   const result = db.ingestEvent(inboxId, {
     method: c.req.method,
     headers,
@@ -438,9 +446,14 @@ async function ingest(c) {
     contentType: c.req.header('content-type') || '',
     signature,
     size: rawBody.byteLength,
+    dedupeKey: dedupe.key,
   });
   if (!result.ok) return c.json(result, 404);
   const resp = { ok: true, id: result.eventId, received: true };
+  if (result.deduped) {
+    resp.deduped = true;
+    resp.eventId = result.eventId;
+  }
   if (result.alert) {
     const a = result.alert;
     resp.alert = {
@@ -459,6 +472,7 @@ async function ingest(c) {
     }
   }
   // Auto-forward on ingest when inbox.autoForward + forwardUrl (free-tier OK — core job)
+  // Skipped on dedupe hits (provider retry must not re-fire side effects).
   if (result.autoForwardTarget) {
     const af = await db.runAutoForward(result.eventId, result.autoForwardTarget);
     if (af) {
@@ -474,11 +488,19 @@ async function ingest(c) {
   }
   // Custom ingest response (inbox.responseStatus/Body/ContentType): send exactly what the
   // operator configured instead of the JSON ack — e.g. 503 to test provider retries.
+  // On a dedupe hit, templates still use the ORIGINAL eventId.
   if (result.customResponse) {
     const cr = result.customResponse;
     const h = { 'x-hookkeep-event-id': result.eventId };
+    if (result.deduped) h['x-hookkeep-deduped'] = '1';
     if (cr.contentType) h['content-type'] = cr.contentType;
     return c.body(cr.body, cr.status, h);
+  }
+  if (result.deduped) {
+    return c.json(resp, 200, {
+      'x-hookkeep-event-id': result.eventId,
+      'x-hookkeep-deduped': '1',
+    });
   }
   return c.json(resp, 200);
 }

@@ -1,5 +1,5 @@
 /** Local smoke test against a running server (default http://127.0.0.1:8787)
- * Steps: create → ingest → list → export → forwardUrl → replay → replay-bulk → delete-bulk → auto-forward → demo unlock → pro alerts → free tier → custom response → signature check → event pin → event diff
+ * Steps: create → ingest → list → export → forwardUrl → replay → replay-bulk → delete-bulk → auto-forward → demo unlock → pro alerts → free tier → custom response → signature check → event pin → event diff → ingest dedupe
  */
 import http from 'node:http';
 import { createHmac } from 'node:crypto';
@@ -160,7 +160,7 @@ async function main() {
   const expCsv = await expCsvRes.text();
   const csvLines = expCsv.trim().split(/\r?\n/);
   check(
-    csvLines[0] === 'id,receivedAt,method,status,contentType,bodyPreview,autoForwardOk,signatureValid,signatureReason,pinned,note',
+    csvLines[0] === 'id,receivedAt,method,status,contentType,bodyPreview,autoForwardOk,signatureValid,signatureReason,pinned,note,dedupeKey',
     'csv header mismatch'
   );
   check(csvLines.length >= 3, `csv expected header+rows, got ${csvLines.length}`);
@@ -513,7 +513,7 @@ async function main() {
   const sgInvalid = await fetch(`${BASE}/api/inboxes/${free.inbox.id}/events?sig=invalid&limit=50`, { headers: sgHdr }).then((r) => r.json());
   check(sgInvalid.events.length >= 3 && sgInvalid.events.every((e) => e.signature && e.signature.valid === false), 'sig=invalid filter');
   const sgCsv = await fetch(`${BASE}/api/inboxes/${free.inbox.id}/events/export?format=csv&sig=valid`, { headers: sgHdr }).then((r) => r.text());
-  check(sgCsv.trim().split('\n').slice(1).every((l) => l.endsWith(',true,ok,,')) && sgCsv.includes(sgOkJson.id), 'csv signature columns');
+  check(sgCsv.trim().split('\n').slice(1).every((l) => l.includes(',true,ok,')) && sgCsv.includes(sgOkJson.id), 'csv signature columns');
   // GitHub
   const ghSecret = 'gh-smoke-secret';
   await sgPatch({ signingScheme: 'github', signingSecret: ghSecret });
@@ -617,6 +617,55 @@ async function main() {
     const ag = await dGet(d1, `?against=${d2}`).then((r) => r.json());
     check(ag.baselineMode === 'against' && ag.body.changes.some((c) => c.path === 'coupon' && c.kind === 'removed'), 'against diff');
     console.log('diff: 401 / no_baseline / previous baseline / type+added / ignore / header version change / against / same_event 400');
+  }
+
+  step('ingest dedupe');
+  {
+    const dc = await fetch(`${BASE}/api/workspace`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ label: 'dedupe-smoke' }),
+    }).then((r) => r.json());
+    const dAuth = { 'x-hookkeep-token': dc.ownerToken, 'content-type': 'application/json' };
+    const bad = await fetch(`${BASE}/api/inboxes/${dc.inbox.id}`, {
+      method: 'PATCH',
+      headers: dAuth,
+      body: JSON.stringify({ dedupeMode: 'md5' }),
+    });
+    check(bad.status === 400 && (await bad.json()).error === 'bad_dedupe_mode', 'bad_dedupe_mode not 400');
+    const set = await fetch(`${BASE}/api/inboxes/${dc.inbox.id}`, {
+      method: 'PATCH',
+      headers: dAuth,
+      body: JSON.stringify({ dedupeMode: 'body-hash' }),
+    }).then((r) => r.json());
+    check(set.inbox?.dedupeMode === 'body-hash', 'body-hash not saved');
+    const body = JSON.stringify({ type: 'invoice.paid', amount: 42, smoke: 'dedupe' });
+    const post = () =>
+      fetch(`${BASE}/hook/${dc.inbox.id}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      });
+    const r1 = await post();
+    const j1 = await r1.json();
+    check(r1.status === 200 && j1.id && !j1.deduped, `first capture ${JSON.stringify(j1)}`);
+    const count1 = (
+      await fetch(`${BASE}/api/workspace`, { headers: { 'x-hookkeep-token': dc.ownerToken } }).then((r) => r.json())
+    ).inboxes[0].eventCount;
+    const r2 = await post();
+    check(r2.headers.get('x-hookkeep-deduped') === '1', 'missing x-hookkeep-deduped');
+    check(r2.headers.get('x-hookkeep-event-id') === j1.id, 'dedupe event-id mismatch');
+    const j2 = await r2.json();
+    check(j2.deduped === true && j2.eventId === j1.id && j2.id === j1.id, `dedupe ack ${JSON.stringify(j2)}`);
+    const count2 = (
+      await fetch(`${BASE}/api/workspace`, { headers: { 'x-hookkeep-token': dc.ownerToken } }).then((r) => r.json())
+    ).inboxes[0].eventCount;
+    check(count2 === count1, `count bumped on dedupe (${count1} → ${count2})`);
+    const ev = await fetch(`${BASE}/api/events/${j1.id}`, {
+      headers: { 'x-hookkeep-token': dc.ownerToken },
+    }).then((r) => r.json());
+    check(ev.event?.dedupeKey && String(ev.event.dedupeKey).startsWith('sha256:'), 'event.dedupeKey missing');
+    console.log('dedupe: bad mode 400 / body-hash hit same id / no count bump / headers + JSON deduped');
   }
 
   step('waitlist');

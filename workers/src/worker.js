@@ -12,11 +12,18 @@
  *   email:<email>             -> workspace id (for billing fulfill lookup)
  *   code:<CODE>               -> unlock code entry { tier, usedBy, note }
  *   pins:<inboxId>            -> JSON array of pinned event ids (exempt from keep-window trim)
+ *   dedupe:<inboxId>:<sha256> -> eventId (ingest dedupe; TTL ~7d)
  */
 
 // Shared with the Node server (pure ESM, zero deps — wrangler bundles it).
 import { normalizeResponsePatch, publicResponseConfig, buildCustomResponse } from '../../src/custom-response.js';
 import { normalizeSignaturePatch, publicSignatureConfig, verifySignature } from '../../src/signature.js';
+import {
+  normalizeDedupePatch,
+  publicDedupeConfig,
+  computeDedupeKey,
+  dedupeKvKey,
+} from '../../src/dedupe.js';
 import {
   normalizePinPatch,
   applyPinPatch,
@@ -93,6 +100,7 @@ function publicInbox(inbox) {
     notifyWebhookUrl: inbox.notifyWebhookUrl || '',
     ...publicResponseConfig(inbox),
     ...publicSignatureConfig(inbox),
+    ...publicDedupeConfig(inbox),
     eventCount: inbox.eventCount || 0,
     createdAt: inbox.createdAt,
   };
@@ -110,6 +118,7 @@ function summarizeEvent(e) {
     respondedStatus: e.respondedStatus ?? 200,
     respondedCustom: Boolean(e.respondedCustom),
     signature: e.signature || null,
+    dedupeKey: e.dedupeKey || null,
     ...publicPinFields(e),
   };
 }
@@ -132,6 +141,7 @@ function toExportEvent(e) {
   };
   if (e.respondedStatus != null) out.respondedStatus = e.respondedStatus;
   if (e.signature && typeof e.signature === 'object') out.signature = e.signature;
+  if (e.dedupeKey) out.dedupeKey = e.dedupeKey;
   if (e.pinned) out.pinned = true;
   if (e.note) out.note = e.note;
   if (e.path) out.path = e.path;
@@ -167,6 +177,7 @@ function eventsToCsv(events) {
     'signatureReason',
     'pinned',
     'note',
+    'dedupeKey',
   ];
   const lines = [header.join(',')];
   for (const e of events) {
@@ -192,6 +203,7 @@ function eventsToCsv(events) {
         escapeCsvField(sg ? sg.reason || '' : ''),
         escapeCsvField(e.pinned ? 'true' : ''),
         escapeCsvField(e.note || ''),
+        escapeCsvField(e.dedupeKey || ''),
       ].join(',')
     );
   }
@@ -389,7 +401,17 @@ async function trimInboxEvents(kv, inboxId, keep) {
   const [keys, pins] = await Promise.all([kv.list({ prefix: `evt:${inboxId}:` }), getPins(kv, inboxId)]);
   const pinSet = new Set(pins);
   const extra = rowsToTrim(keys.keys, keep, (k) => [...pinSet].some((id) => k.name.endsWith(`_${id}`)));
-  await Promise.all(extra.map((k) => kv.delete(k.name)));
+  await Promise.all(
+    extra.map(async (k) => {
+      const ev = await kv.get(k.name, 'json');
+      if (ev && ev.dedupeKey) {
+        try {
+          await kv.delete(await dedupeKvKey(inboxId, ev.dedupeKey));
+        } catch {}
+      }
+      await kv.delete(k.name);
+    })
+  );
   return extra.length;
 }
 
@@ -570,6 +592,55 @@ export default {
         const signature = await verifySignature(inbox, { headers, rawBody });
         const contentType = request.headers.get('content-type') || '';
 
+        // Dedupe after signature verify — hit reuses prior capture (no count/alerts/forward)
+        const dedupe = await computeDedupeKey({
+          mode: inbox.dedupeMode,
+          headerName: inbox.dedupeHeader,
+          headers,
+          bodyText: rawBody,
+        });
+        if (dedupe.key) {
+          const dKey = await dedupeKvKey(inboxId, dedupe.key);
+          const priorId = await kv.get(dKey);
+          if (priorId) {
+            const listed = await kv.list({ prefix: `evt:${inboxId}:` });
+            let prior = null;
+            for (const k of listed.keys) {
+              if (k.name.includes(priorId)) {
+                const ev = await kv.get(k.name, 'json');
+                if (ev && ev.id === priorId) {
+                  prior = ev;
+                  break;
+                }
+              }
+            }
+            if (prior) {
+              const customResponse = buildCustomResponse(inbox, prior);
+              if (customResponse) {
+                const h = {
+                  'access-control-allow-origin': '*',
+                  'x-hookkeep-event-id': prior.id,
+                  'x-hookkeep-deduped': '1',
+                };
+                if (customResponse.contentType) h['content-type'] = customResponse.contentType;
+                return new Response(customResponse.body, { status: customResponse.status, headers: h });
+              }
+              return new Response(
+                JSON.stringify({ ok: true, id: prior.id, eventId: prior.id, received: true, deduped: true }),
+                {
+                  status: 200,
+                  headers: {
+                    'content-type': 'application/json',
+                    'access-control-allow-origin': '*',
+                    'x-hookkeep-event-id': prior.id,
+                    'x-hookkeep-deduped': '1',
+                  },
+                }
+              );
+            }
+          }
+        }
+
         let parsed = null;
         try {
           if (bodyText && contentType.includes('json')) parsed = JSON.parse(bodyText);
@@ -593,6 +664,7 @@ export default {
           size: rawBody.byteLength,
         };
         if (signature) event.signature = signature;
+        if (dedupe.key) event.dedupeKey = String(dedupe.key).slice(0, 300);
 
         // Per-inbox custom ingest response (status/body/content-type) — free tier OK
         const customResponse = buildCustomResponse(inbox, event);
@@ -657,6 +729,11 @@ export default {
             }
             await kv.put(evKey(inboxId, ts, eventId), JSON.stringify(event));
             await kv.put(`inbox:${inboxId}`, JSON.stringify(inbox));
+            if (dedupe.key) {
+              await kv.put(await dedupeKvKey(inboxId, dedupe.key), eventId, {
+                expirationTtl: 60 * 60 * 24 * 7,
+              });
+            }
             await saveWorkspace(kv, ws);
             // Trim to keep window (pinned events exempt)
             await trimInboxEvents(kv, inboxId, limits.maxEventsKeep);
@@ -759,6 +836,8 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           signingScheme: 'none',
           signingSecret: '',
           signingHeader: '',
+          dedupeMode: 'none',
+          dedupeHeader: 'idempotency-key',
           createdAt: new Date().toISOString(),
           eventCount: 0,
         };
@@ -818,6 +897,8 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           signingScheme: 'none',
           signingSecret: '',
           signingHeader: '',
+          dedupeMode: 'none',
+          dedupeHeader: 'idempotency-key',
           createdAt: new Date().toISOString(),
           eventCount: 0,
         };
@@ -841,8 +922,11 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
         if (!rp.ok) return json({ error: rp.error, message: rp.message }, 400);
         const sp = normalizeSignaturePatch(body);
         if (!sp.ok) return json({ error: sp.error, message: sp.message }, 400);
+        const dp = normalizeDedupePatch(body);
+        if (!dp.ok) return json({ error: dp.error, message: dp.message }, 400);
         Object.assign(inbox, rp.patch);
         Object.assign(inbox, sp.patch);
+        Object.assign(inbox, dp.patch);
         if (body.name != null) inbox.name = String(body.name).slice(0, 80);
         if (body.forwardUrl != null) inbox.forwardUrl = String(body.forwardUrl).slice(0, 500);
         if (body.autoForward != null) inbox.autoForward = Boolean(body.autoForward);

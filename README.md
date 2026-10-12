@@ -73,7 +73,7 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
 - `POST /api/workspace` → create workspace + first inbox + owner token
 - `POST /hook/:inboxId` → **public ingest** (any method)
 - `GET /api/workspace` + header `x-hookkeep-token`
-- `PATCH /api/inboxes/:id` `{ name?, forwardUrl?, autoForward?, alertKeyword?, alertEmail?, notifyWebhookUrl?, responseStatus?, responseBody?, responseContentType? }`
+- `PATCH /api/inboxes/:id` `{ name?, forwardUrl?, autoForward?, alertKeyword?, alertEmail?, notifyWebhookUrl?, responseStatus?, responseBody?, responseContentType?, signingScheme?, signingSecret?, signingHeader?, dedupeMode?, dedupeHeader? }`
 - **Custom ingest response** — set `responseStatus` (200–599; `0`/`null` = default JSON ack), optional `responseBody` (≤10k chars,
   placeholders `{{eventId}}` `{{method}}` `{{receivedAt}}` `{{json.some.path}}`) and `responseContentType` (auto JSON/text when blank).
   `/hook/:inboxId` then answers exactly that (204/205/304 send no body) plus header `x-hookkeep-event-id`. Use it to make the
@@ -89,6 +89,15 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
   **write-only** — APIs return only `hasSigningSecret` + `signingSecretHint` (`••••` + last 4); `signingSecret: ""` clears it.
   Capture is always stored and the ingest response is unchanged (custom response still applies). Bad scheme → 400 `bad_signing_scheme`
   (patch not applied). Free tier OK. Dashboard: sidebar **Signature check** panel; event rows show `✓ sig` / `✗ sig`; detail shows the reason.
+- **Ingest dedupe** — `PATCH /api/inboxes/:id` `{ dedupeMode: none|idempotency|body-hash|either, dedupeHeader? }` (header default
+  `idempotency-key`, ≤64 chars). Provider retries reuse the prior capture instead of filling the keep-window twice. After signature
+  verify, Hookkeep computes a `dedupeKey` (`idempotency`: trimmed header ≤256 chars; `body-hash`: `sha256:<hex>` of raw body bytes —
+  empty body has a stable hash; method is NOT part of the key; `either`: header first, else body-hash). On a hit: no new event, no
+  `eventCount` bump, no alerts/auto-forward re-fire; the ingest response matches a fresh capture for the **original** eventId
+  (custom templates included) plus headers `x-hookkeep-event-id` and `x-hookkeep-deduped: 1`. Default JSON ack adds `deduped: true`
+  and `eventId`. On a miss the event stores `dedupeKey`. Missing header in `idempotency` mode → store as new. Bad mode → 400
+  `bad_dedupe_mode`. Free tier OK (core webhook hygiene). Shared `src/dedupe.js` (Node + Workers; Workers KV `dedupe:<inboxId>:<sha256>`
+  → eventId, ~7d TTL). Dashboard: sidebar **Dedupe** panel; muted `dedupe` badge on events with a key.
 - **Pin + note an event** — `PATCH /api/events/:id` `{ pinned?: boolean, note?: string|null }` (note ≤ 280 chars). A pinned event is
   **exempt from the keep-window trim** (free keeps the newest 50 *unpinned* events, Pro 5000) and is **skipped by bulk delete** unless
   you pass `includePinned: true` — so the one failing payload you're debugging doesn't scroll away during a retry storm. Pins per inbox:
@@ -107,7 +116,7 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
   `bad_ignore`. Read-only, free tier OK. Shared `src/event-diff.js` (Node + Workers). Dashboard: event detail **⇄ Compare with another
   event** (previous / pinned / recent picker, ignore paths, all-headers toggle, colored +/−/~ list).
 - `GET /api/inboxes/:id/events?q=&method=&statusMin=&sig=&pinned=` (text / HTTP method / status ≥ N / signature `valid|invalid|unchecked` / `pinned=1|0`)
-- `GET /api/inboxes/:id/events/export?format=json|csv&q=&method=&statusMin=&sig=&pinned=&limit=` → bulk download of the **current filtered** set (same filters/cap as list; free tier OK; JSON rows carry `signature`, CSV adds `signatureValid,signatureReason,pinned,note`)
+- `GET /api/inboxes/:id/events/export?format=json|csv&q=&method=&statusMin=&sig=&pinned=&limit=` → bulk download of the **current filtered** set (same filters/cap as list; free tier OK; JSON rows carry `signature`, CSV adds `signatureValid,signatureReason,pinned,note,dedupeKey`)
 - `POST /api/inboxes/:id/events/replay-bulk` `{ targetUrl?, q?, method?, statusMin?, limit? }` → serially replay the **current filtered** set via the same forward path (default/hard max 50; free tier OK). Target = `targetUrl` else inbox `forwardUrl`; neither → 400 `no_forward_url`.
 - `POST /api/inboxes/:id/events/delete-bulk` `{ q?, method?, statusMin?, limit?, confirm: true, includePinned? }` → delete the **current filtered** set (same filters; default/hard max 50; free tier OK; pinned events skipped unless `includePinned: true`). Missing `confirm: true` → 400 `confirm_required`. Returns `{ ok, inboxId, filters, deleted, ids }`; inbox `eventCount` decremented.
 - `GET /api/inboxes/:id/alerts?limit=20` → recent Pro alert records
