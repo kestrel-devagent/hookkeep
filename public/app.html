@@ -63,6 +63,16 @@
           <input id="auto-forward" type="checkbox" />
           Auto-forward on receive
         </label>
+        <div id="forward-retry-row" style="display:flex;gap:0.35rem;align-items:center;margin:0.2rem 0 0.35rem">
+          <label class="muted" style="font-size:0.75rem;white-space:nowrap" for="forward-retries" title="Retry transient failures (network error, 408, 425, 429, 5xx). Other 4xx fail at once.">Retries</label>
+          <select id="forward-retries" style="width:3.6rem">
+            <option value="0">0</option><option value="1">1</option><option value="2">2</option>
+            <option value="3">3</option><option value="4">4</option><option value="5">5</option>
+          </select>
+          <label class="muted" style="font-size:0.75rem;white-space:nowrap" for="forward-backoff" title="Base delay; doubles each retry (1s → 1s, 2s, 4s…)">backoff ms</label>
+          <input id="forward-backoff" type="number" min="100" max="60000" step="100" placeholder="1000" style="flex:1;min-width:0;width:auto" />
+        </div>
+        <p id="forward-schedule" class="fine" style="font-size:0.7rem;margin:0 0 0.35rem"></p>
         <label class="muted" style="font-size:0.8rem">Alert keyword (Pro)</label>
         <input id="alert-kw" type="text" placeholder="error / failed / 500" style="width:100%;margin:0.35rem 0" />
         <label class="muted" style="font-size:0.8rem">Notify webhook URL (Pro)</label>
@@ -193,10 +203,18 @@
               <option value="1">📌 Pinned only</option>
               <option value="0">Unpinned only</option>
             </select>
+            <select id="filter-forward" aria-label="Auto-forward filter" style="max-width:8.5rem">
+              <option value="">Any forward</option>
+              <option value="failed">↻ Forward failed</option>
+              <option value="pending">Forward retrying</option>
+              <option value="delivered">Forward delivered</option>
+              <option value="none">Not forwarded</option>
+            </select>
             <button class="btn btn-sm" id="btn-refresh">Refresh</button>
             <button class="btn btn-sm" id="btn-export-json" title="Download current filtered events as JSON">Export JSON</button>
             <button class="btn btn-sm" id="btn-export-csv" title="Download current filtered events as CSV">Export CSV</button>
             <button class="btn btn-sm" id="btn-replay-filtered" title="Replay current filtered events to Forward URL">Replay filtered</button>
+            <button class="btn btn-sm" id="btn-retry-forwards" title="One immediate attempt for each filtered event whose auto-forward failed (max 50)">Retry failed forwards</button>
             <button class="btn btn-sm btn-danger" id="btn-delete-filtered" title="Delete current filtered events (max 50, irreversible)">Delete filtered</button>
             <span id="replay-bulk-status" class="muted" style="font-size:0.85rem" hidden></span>
           </div>
@@ -275,6 +293,8 @@ const ERRORS = {
   not_found: 'Not found.',
   confirm_required: 'Confirm required before bulk delete.',
   bad_response_status: 'Custom response status must be 200–599 (or 0 for the default ack).',
+  bad_forward_retries: 'Forward retries must be 0–5.',
+  bad_forward_backoff: 'Forward backoff must be 100–60000 ms.',
 };
 function humanError(e) {
   const code = e?.data?.error || e?.message || '';
@@ -358,6 +378,11 @@ function render() {
     $('webhook-url').textContent = active.webhookUrl;
     $('forward-url').value = active.forwardUrl || '';
     if ($('auto-forward')) $('auto-forward').checked = Boolean(active.autoForward);
+    if ($('forward-retries')) {
+      $('forward-retries').value = String(active.forwardRetries || 0);
+      $('forward-backoff').value = String(active.forwardBackoffMs || 1000);
+      renderForwardSchedule(active.forwardRetries || 0, active.forwardBackoffMs || 1000);
+    }
     $('alert-kw').value = active.alertKeyword || '';
     $('notify-url').value = active.notifyWebhookUrl || '';
     $('alert-email').value = active.alertEmail || '';
@@ -407,6 +432,28 @@ function render() {
     : 'Unlock Pro for webhook/Discord/Slack alerts';
 }
 
+function fmtMs(ms) {
+  return ms >= 1000 ? `${+(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+}
+function renderForwardSchedule(retries, base) {
+  const el = $('forward-schedule');
+  if (!el) return;
+  const n = Number(retries) || 0;
+  const b = Math.min(Math.max(Number(base) || 1000, 100), 60000);
+  if (!n) { el.textContent = 'Single attempt (no retries).'; return; }
+  const gaps = [];
+  for (let i = 0; i < n; i++) gaps.push(fmtMs(Math.min(b * 2 ** i, 300000)));
+  el.textContent = `Up to ${n + 1} attempts · waits ${gaps.join(', ')} · only network errors / 408 / 425 / 429 / 5xx retry`;
+}
+function forwardBadge(e) {
+  if (!e.forwardState) return '';
+  const n = e.forwardAttempts || 1;
+  const x = n > 1 ? ` ×${n}` : '';
+  if (e.forwardState === 'delivered') return ` <span title="Auto-forward delivered after ${n} attempt${n === 1 ? '' : 's'}" style="color:var(--ok, #3d9a5f);font-size:0.72rem">✓ fwd${x}</span>`;
+  if (e.forwardState === 'pending') return ` <span class="muted" title="Auto-forward failed ${n}× — retry scheduled" style="font-size:0.72rem">↻ fwd retrying</span>`;
+  return ` <span title="Auto-forward failed after ${n} attempt${n === 1 ? '' : 's'}" style="color:var(--danger);font-size:0.72rem">✗ fwd${x}</span>`;
+}
+
 async function loadEvents() {
   if (!state.activeInboxId) return;
   const q = $('search').value.trim();
@@ -418,6 +465,8 @@ async function loadEvents() {
   if (statusMin !== '') qs.set('statusMin', statusMin);
   const pinnedF = ($('filter-pinned') && $('filter-pinned').value) || '';
   if (pinnedF) qs.set('pinned', pinnedF);
+  const forwardF = ($('filter-forward') && $('filter-forward').value) || '';
+  if (forwardF) qs.set('forward', forwardF);
   const data = await api(`/api/inboxes/${state.activeInboxId}/events?${qs.toString()}`);
   state.lastEvents = data.events || [];
   const tbody = $('events-body');
@@ -431,7 +480,7 @@ async function loadEvents() {
   tbody.innerHTML = data.events.map((e) => `
     <tr data-id="${e.id}" data-pinned="${e.pinned ? '1' : '0'}">
       <td>${new Date(e.receivedAt).toLocaleString()}</td>
-      <td>${e.pinned ? `<span title="${escapeHtml(e.note ? `Pinned — ${e.note}` : 'Pinned (never trimmed)')}">📌</span> ` : ''}<code>${e.method}</code>${e.respondedCustom ? ` <span class="muted" title="Hookkeep answered with your custom response">↩ ${escapeHtml(String(e.respondedStatus))}</span>` : ''}${e.signature ? ` <span title="${escapeHtml(`${e.signature.scheme}: ${e.signature.reason}`)}" style="color:${e.signature.valid ? 'var(--ok, #3d9a5f)' : 'var(--danger)'}">${e.signature.valid ? '✓ sig' : '✗ sig'}</span>` : ''}${e.dedupeKey ? ` <span class="muted" title="${escapeHtml(e.dedupeKey)}" style="font-size:0.72rem">dedupe</span>` : ''}</td>
+      <td>${e.pinned ? `<span title="${escapeHtml(e.note ? `Pinned — ${e.note}` : 'Pinned (never trimmed)')}">📌</span> ` : ''}<code>${e.method}</code>${e.respondedCustom ? ` <span class="muted" title="Hookkeep answered with your custom response">↩ ${escapeHtml(String(e.respondedStatus))}</span>` : ''}${e.signature ? ` <span title="${escapeHtml(`${e.signature.scheme}: ${e.signature.reason}`)}" style="color:${e.signature.valid ? 'var(--ok, #3d9a5f)' : 'var(--danger)'}">${e.signature.valid ? '✓ sig' : '✗ sig'}</span>` : ''}${e.dedupeKey ? ` <span class="muted" title="${escapeHtml(e.dedupeKey)}" style="font-size:0.72rem">dedupe</span>` : ''}${forwardBadge(e)}</td>
       <td>${e.statusGuess ? `<code>${escapeHtml(e.statusGuess)}</code>` : '—'}</td>
       <td class="muted">${e.note ? `<em>${escapeHtml(e.note)}</em> · ` : ''}${escapeHtml(e.preview || '')}</td>
     </tr>`).join('');
@@ -548,15 +597,28 @@ async function openEvent(id) {
     const af = data.event.autoForward;
     if (af) {
       afEl.hidden = false;
+      const st = af.state || (af.ok ? 'delivered' : 'failed');
+      const head = st === 'delivered' ? 'Auto-forward delivered' : st === 'pending' ? 'Auto-forward retrying' : 'Auto-forward failed';
       const bits = [
-        af.ok ? 'Auto-forward OK' : 'Auto-forward failed',
+        head,
         af.status != null ? `HTTP ${af.status}` : null,
         af.ms != null ? `${af.ms}ms` : null,
         af.error || null,
+        af.attemptCount > 1 || af.maxAttempts > 1 ? `attempt ${af.attemptCount || 1}${af.maxAttempts ? ` (auto max ${af.maxAttempts})` : ''}` : null,
+        af.nextAttemptAt ? `next ${new Date(af.nextAttemptAt).toLocaleTimeString()}` : null,
+        af.gaveUp ? `gave up: ${af.gaveUp.replace('_', '-')}` : null,
         af.target ? `→ ${af.target}` : null,
       ].filter(Boolean);
       afEl.textContent = bits.join(' · ');
-      afEl.style.color = af.ok ? 'var(--ok, #3d9a5f)' : 'var(--danger)';
+      if (Array.isArray(af.attempts) && af.attempts.length > 1) {
+        const ul = document.createElement('div');
+        ul.style.cssText = 'font-size:0.78rem;margin-top:0.25rem;color:var(--muted, #9aa8c7)';
+        ul.textContent = af.attempts
+          .map((a) => `#${a.n} ${new Date(a.at).toLocaleTimeString()} ${a.ok ? '✓' : '✗'} ${a.status != null ? a.status : a.error || 'error'}${a.manual ? ' (manual)' : ''}`)
+          .join('  ·  ');
+        afEl.appendChild(ul);
+      }
+      afEl.style.color = st === 'delivered' ? 'var(--ok, #3d9a5f)' : st === 'pending' ? '' : 'var(--danger)';
     } else {
       afEl.hidden = true;
       afEl.textContent = '';
@@ -673,6 +735,12 @@ if ($('btn-save-note'))
   $('btn-save-note').onclick = () =>
     patchCurrentEvent({ note: $('ev-note').value }, (d) => (d.event.note ? 'Note saved' : 'Note cleared'));
 if ($('filter-pinned')) $('filter-pinned').onchange = () => loadEvents();
+if ($('filter-forward')) $('filter-forward').onchange = () => loadEvents();
+if ($('forward-retries')) {
+  const upd = () => renderForwardSchedule($('forward-retries').value, $('forward-backoff').value);
+  $('forward-retries').onchange = upd;
+  $('forward-backoff').oninput = upd;
+}
 
 $('btn-back').onclick = () => {
   $('detail-view').classList.add('hidden');
@@ -784,6 +852,8 @@ async function downloadFilteredExport(format) {
   if (statusMin !== '') qs.set('statusMin', statusMin);
   const pinnedF = ($('filter-pinned') && $('filter-pinned').value) || '';
   if (pinnedF) qs.set('pinned', pinnedF);
+  const forwardF = ($('filter-forward') && $('filter-forward').value) || '';
+  if (forwardF) qs.set('forward', forwardF);
   try {
     const res = await fetch(`/api/inboxes/${state.activeInboxId}/events/export?${qs.toString()}`, {
       headers: { 'x-hookkeep-token': token },
@@ -899,6 +969,47 @@ async function deleteFilteredEvents() {
 }
 if ($('btn-delete-filtered')) $('btn-delete-filtered').onclick = () => deleteFilteredEvents();
 
+async function retryFailedForwards() {
+  if (!state.activeInboxId) return;
+  const btn = $('btn-retry-forwards');
+  const statusEl = $('replay-bulk-status');
+  const body = {};
+  const q = $('search').value.trim();
+  const method = ($('filter-method') && $('filter-method').value) || '';
+  const statusMin = ($('filter-status-min') && $('filter-status-min').value.trim()) || '';
+  if (q) body.q = q;
+  if (method) body.method = method;
+  if (statusMin !== '') body.statusMin = Number(statusMin);
+  if (($('filter-forward') && $('filter-forward').value) === 'pending') body.includePending = true;
+  if (btn) btn.disabled = true;
+  if (statusEl) {
+    statusEl.hidden = false;
+    statusEl.textContent = 'Retrying failed forwards…';
+  }
+  try {
+    const res = await fetch(`/api/inboxes/${state.activeInboxId}/events/retry-forwards`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok && res.status !== 207) throw Object.assign(new Error(data.error || res.statusText), { data });
+    const msg = data.attempted
+      ? `Retry forwards: ${data.attempted} attempted · ${data.succeeded} delivered · ${data.failed} still failing`
+      : 'No failed auto-forwards match the current filters.';
+    if (statusEl) statusEl.textContent = msg;
+    toast(msg, Boolean(data.failed));
+    await loadEvents();
+  } catch (e) {
+    const err = humanError(e);
+    if (statusEl) statusEl.textContent = err;
+    toast(err, true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+if ($('btn-retry-forwards')) $('btn-retry-forwards').onclick = () => retryFailedForwards();
+
 const RESPONSE_PRESETS = {
   default: { status: '', ct: '', body: '' },
   '503': { status: '503', ct: 'application/json', body: '{"error":"hookkeep simulated outage","id":"{{eventId}}"}' },
@@ -934,6 +1045,12 @@ $('btn-save-inbox').onclick = async () => {
       body: JSON.stringify({
         forwardUrl: $('forward-url').value,
         autoForward: Boolean($('auto-forward') && $('auto-forward').checked),
+        ...($('forward-retries')
+          ? {
+              forwardRetries: Number($('forward-retries').value || 0),
+              forwardBackoffMs: Number($('forward-backoff').value || 0),
+            }
+          : {}),
         alertKeyword: $('alert-kw').value,
         notifyWebhookUrl: $('notify-url').value,
         alertEmail: $('alert-email').value,

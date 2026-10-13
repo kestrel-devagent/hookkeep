@@ -179,7 +179,7 @@ app.patch('/api/inboxes/:id', async (c) => {
   try {
     inbox = db.updateInbox(ws, c.req.param('id'), body);
   } catch (e) {
-    if (['bad_response_status', 'bad_signing_scheme', 'bad_signing_secret', 'bad_signing_header', 'bad_dedupe_mode', 'bad_dedupe_header'].includes(e.code)) {
+    if (['bad_response_status', 'bad_signing_scheme', 'bad_signing_secret', 'bad_signing_header', 'bad_dedupe_mode', 'bad_dedupe_header', 'bad_forward_retries', 'bad_forward_backoff'].includes(e.code)) {
       return c.json({ error: e.code, message: e.message }, 400);
     }
     throw e;
@@ -204,7 +204,8 @@ app.get('/api/inboxes/:id/events/export', (c) => {
   const limit = Number(c.req.query('limit') || 50);
   const sig = c.req.query('sig') || '';
   const pinned = c.req.query('pinned') || '';
-  const hit = db.exportEvents(ws, inboxId, { q, method, statusMin, limit, sig, pinned });
+  const forward = c.req.query('forward') || '';
+  const hit = db.exportEvents(ws, inboxId, { q, method, statusMin, limit, sig, pinned, forward });
   if (!hit) return c.json({ error: 'not_found' }, 404);
   const day = new Date().toISOString().slice(0, 10);
   const filename = `hookkeep-events-${inboxId}-${day}.${format}`;
@@ -214,6 +215,7 @@ app.get('/api/inboxes/:id/events/export', (c) => {
     statusMin: statusMin == null || Number.isNaN(statusMin) ? undefined : statusMin,
     sig: sig || undefined,
     pinned: pinned || undefined,
+    forward: forward || undefined,
     limit,
   };
   if (format === 'csv') {
@@ -302,6 +304,25 @@ app.post('/api/inboxes/:id/events/delete-bulk', async (c) => {
   return c.json(result, 200);
 });
 
+// Manual "retry failed forwards": one immediate attempt per filtered event whose auto-forward failed
+app.post('/api/inboxes/:id/events/retry-forwards', async (c) => {
+  const ws = requireWs(c);
+  if (!ws) return c.json({ error: 'unauthorized' }, 401);
+  const body = await c.req.json().catch(() => ({}));
+  const statusMinRaw = body.statusMin;
+  const result = await db.retryFailedForwards(ws, c.req.param('id'), {
+    targetUrl: body.targetUrl,
+    q: body.q != null ? String(body.q) : '',
+    method: body.method != null ? String(body.method) : '',
+    statusMin:
+      statusMinRaw === undefined || statusMinRaw === null || statusMinRaw === '' ? null : Number(statusMinRaw),
+    limit: body.limit != null ? Number(body.limit) : 50,
+    includePending: body.includePending === true,
+  });
+  if (!result) return c.json({ error: 'not_found' }, 404);
+  return c.json(result, result.ok ? 200 : 207);
+});
+
 app.get('/api/inboxes/:id/events', (c) => {
   const ws = requireWs(c);
   if (!ws) return c.json({ error: 'unauthorized' }, 401);
@@ -316,6 +337,7 @@ app.get('/api/inboxes/:id/events', (c) => {
     statusMin,
     sig: c.req.query('sig') || '',
     pinned: c.req.query('pinned') || '',
+    forward: c.req.query('forward') || '',
     limit: Number(c.req.query('limit') || 50),
   });
   if (!events) return c.json({ error: 'not_found' }, 404);
@@ -474,7 +496,9 @@ async function ingest(c) {
   // Auto-forward on ingest when inbox.autoForward + forwardUrl (free-tier OK — core job)
   // Skipped on dedupe hits (provider retry must not re-fire side effects).
   if (result.autoForwardTarget) {
-    const af = await db.runAutoForward(result.eventId, result.autoForwardTarget);
+    // Attempt 1 runs in-request; transient failures (network/408/425/429/5xx) are retried in the
+    // background per inbox forwardRetries/forwardBackoffMs — see event.autoForward.attempts.
+    const af = await db.runAutoForward(result.eventId, result.autoForwardTarget, result.autoForwardRetry);
     if (af) {
       resp.autoForward = {
         attempted: true,
@@ -482,8 +506,11 @@ async function ingest(c) {
         status: af.status,
         ms: af.ms,
         target: af.target,
+        state: af.state,
+        maxAttempts: af.maxAttempts,
       };
       if (af.error) resp.autoForward.error = af.error;
+      if (af.nextAttemptAt) resp.autoForward.nextAttemptAt = af.nextAttemptAt;
     }
   }
   // Custom ingest response (inbox.responseStatus/Body/ContentType): send exactly what the
@@ -517,3 +544,10 @@ console.log(
   `[hookkeep] billing: ${BILLING_PUBLIC_URL || 'NOT SET — /subscribe shows setup page'}${PUBLIC_BASE ? ` · public URL: ${PUBLIC_BASE}` : ' · public URL: request host (HOOKKEEP_PUBLIC_URL unset)'}`
 );
 serve({ fetch: app.fetch, port: PORT, hostname: '0.0.0.0' });
+// Re-arm auto-forward retries that were pending when the process last stopped
+try {
+  const resumed = db.resumePendingForwards();
+  if (resumed) console.log(`[hookkeep] resumed ${resumed} pending auto-forward retr${resumed === 1 ? 'y' : 'ies'}`);
+} catch (e) {
+  console.log('[hookkeep] resumePendingForwards failed', String(e.message || e));
+}

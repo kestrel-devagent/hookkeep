@@ -13,6 +13,11 @@
  *   code:<CODE>               -> unlock code entry { tier, usedBy, note }
  *   pins:<inboxId>            -> JSON array of pinned event ids (exempt from keep-window trim)
  *   dedupe:<inboxId>:<sha256> -> eventId (ingest dedupe; TTL ~7d)
+ *
+ * Auto-forward retries: transient failures are retried in-process inside ctx.waitUntil under a
+ * ~25s wall-clock budget (Cloudflare cancels waitUntil work ~30s after the response). A retry
+ * that would not fit is skipped and the event ends `failed` with `gaveUp: "budget"` — use
+ * POST /api/inboxes/:id/events/retry-forwards (or a Cron Trigger calling it) to finish the job.
  */
 
 // Shared with the Node server (pure ESM, zero deps — wrangler bundles it).
@@ -33,6 +38,18 @@ import {
   pinLimitFor,
 } from '../../src/event-pin.js';
 import { diffEvents, diffOptionsFromQuery } from '../../src/event-diff.js';
+import {
+  normalizeForwardRetryPatch,
+  publicForwardRetryConfig,
+  forwardRetryConfig,
+  startForwardRecord,
+  applyForwardAttempt,
+  deliverWithRetries,
+  forwardFilterMatch,
+  forwardStateOf,
+  publicForwardFields,
+  WORKERS_RETRY_BUDGET_MS,
+} from '../../src/forward-retry.js';
 
 const TIERS = {
   free: { name: 'Free', maxInboxes: 1, maxEventsKeep: 50, maxEventsMonth: 500, alerts: false, maxPinned: 5 },
@@ -101,6 +118,7 @@ function publicInbox(inbox) {
     ...publicResponseConfig(inbox),
     ...publicSignatureConfig(inbox),
     ...publicDedupeConfig(inbox),
+    ...publicForwardRetryConfig(inbox),
     eventCount: inbox.eventCount || 0,
     createdAt: inbox.createdAt,
   };
@@ -119,6 +137,7 @@ function summarizeEvent(e) {
     respondedCustom: Boolean(e.respondedCustom),
     signature: e.signature || null,
     dedupeKey: e.dedupeKey || null,
+    ...publicForwardFields(e),
     ...publicPinFields(e),
   };
 }
@@ -153,7 +172,12 @@ function toExportEvent(e) {
       ms: e.autoForward.ms ?? null,
       error: e.autoForward.error || null,
       target: e.autoForward.target || null,
+      state: forwardStateOf(e),
+      attemptCount: e.autoForward.attemptCount != null ? e.autoForward.attemptCount : 1,
     };
+    if (Array.isArray(e.autoForward.attempts)) out.autoForward.attempts = e.autoForward.attempts;
+    if (e.autoForward.nextAttemptAt) out.autoForward.nextAttemptAt = e.autoForward.nextAttemptAt;
+    if (e.autoForward.gaveUp) out.autoForward.gaveUp = e.autoForward.gaveUp;
   }
   return out;
 }
@@ -178,6 +202,8 @@ function eventsToCsv(events) {
     'pinned',
     'note',
     'dedupeKey',
+    'forwardState',
+    'forwardAttempts',
   ];
   const lines = [header.join(',')];
   for (const e of events) {
@@ -204,6 +230,8 @@ function eventsToCsv(events) {
         escapeCsvField(e.pinned ? 'true' : ''),
         escapeCsvField(e.note || ''),
         escapeCsvField(e.dedupeKey || ''),
+        escapeCsvField(forwardStateOf(e) || ''),
+        escapeCsvField(publicForwardFields(e).forwardAttempts || ''),
       ].join(',')
     );
   }
@@ -221,7 +249,7 @@ function signatureFilterMatch(ev, sig) {
   return true;
 }
 
-async function collectFilteredEvents(kv, inboxId, limits, { q, methodFilter, statusMin, cap, sig = '', pinned = '', outKeys = null }) {
+async function collectFilteredEvents(kv, inboxId, limits, { q, methodFilter, statusMin, cap, sig = '', pinned = '', forward = '', outKeys = null }) {
   const listed = await kv.list({ prefix: `evt:${inboxId}:`, limit: limits.maxEventsKeep + (limits.maxPinned || 0) });
   const events = [];
   for (const k of listed.keys) {
@@ -243,6 +271,7 @@ async function collectFilteredEvents(kv, inboxId, limits, { q, methodFilter, sta
     }
     if (sig && !signatureFilterMatch(ev, sig)) continue;
     if (pinned !== '' && pinned != null && !pinnedFilterMatch(ev, pinned)) continue;
+    if (forward && !forwardFilterMatch(ev, forward)) continue;
     events.push(ev);
     if (outKeys) outKeys.push(k.name);
   }
@@ -499,7 +528,7 @@ function baseUrl(request, env) {
 
 
 /** Forward a captured event (manual replay or auto-forward). Never throws. */
-async function forwardCapturedEvent(ev, url, { timeoutMs = 15_000, auto = false } = {}) {
+async function forwardCapturedEvent(ev, url, { timeoutMs = 15_000, auto = false, attempt = null } = {}) {
   const target = String(url || '').trim();
   if (!target) return { ok: false, error: 'no_forward_url' };
   let dest;
@@ -520,6 +549,7 @@ async function forwardCapturedEvent(ev, url, { timeoutMs = 15_000, auto = false 
   headers['x-hookkeep-replay'] = '1';
   headers['x-hookkeep-event-id'] = ev.id;
   if (auto) headers['x-hookkeep-auto-forward'] = '1';
+  if (attempt != null) headers['x-hookkeep-attempt'] = String(attempt);
   const started = Date.now();
   try {
     const res = await fetch(target, {
@@ -710,24 +740,20 @@ export default {
             ? String(inbox.forwardUrl).trim()
             : null;
 
+        const retryCfg = forwardRetryConfig(inbox);
+        if (autoForwardTarget) {
+          event.autoForward = startForwardRecord({
+            target: autoForwardTarget,
+            retries: retryCfg.retries,
+            backoffMs: retryCfg.backoffMs,
+          });
+        }
+        const eKey = evKey(inboxId, ts, eventId);
+
         ctx.waitUntil(
           (async () => {
-            // Auto-forward before final put so event record includes result
-            if (autoForwardTarget) {
-              const fwd = await forwardCapturedEvent(event, autoForwardTarget, {
-                timeoutMs: 8000,
-                auto: true,
-              });
-              event.autoForward = {
-                ok: Boolean(fwd.ok),
-                status: fwd.status,
-                ms: fwd.ms,
-                target: fwd.target,
-              };
-              if (fwd.error) event.autoForward.error = String(fwd.error).slice(0, 80);
-              if (fwd.message && !fwd.ok) event.autoForward.message = String(fwd.message).slice(0, 200);
-            }
-            await kv.put(evKey(inboxId, ts, eventId), JSON.stringify(event));
+            // Store first so the capture is visible while auto-forward (and its retries) run
+            await kv.put(eKey, JSON.stringify(event));
             await kv.put(`inbox:${inboxId}`, JSON.stringify(inbox));
             if (dedupe.key) {
               await kv.put(await dedupeKvKey(inboxId, dedupe.key), eventId, {
@@ -737,6 +763,21 @@ export default {
             await saveWorkspace(kv, ws);
             // Trim to keep window (pinned events exempt)
             await trimInboxEvents(kv, inboxId, limits.maxEventsKeep);
+            if (autoForwardTarget) {
+              // Attempt 1 + transient-failure retries with backoff, inside the waitUntil budget
+              const record = await deliverWithRetries({
+                record: event.autoForward,
+                budgetMs: WORKERS_RETRY_BUDGET_MS,
+                attempt: (timeoutMs, n) =>
+                  forwardCapturedEvent(event, autoForwardTarget, { timeoutMs, auto: true, attempt: n }),
+              });
+              // Re-read so a pin/note set meanwhile isn't clobbered; skip if trimmed/deleted
+              const live = await kv.get(eKey, 'json');
+              if (live) {
+                live.autoForward = record;
+                await kv.put(eKey, JSON.stringify(live));
+              }
+            }
           })()
         );
 
@@ -748,7 +789,7 @@ export default {
           overMonth: ws.eventsThisMonth > limits.maxEventsMonth,
         };
         if (autoForwardTarget) {
-          resp.autoForward = { attempted: true, queued: true, target: autoForwardTarget };
+          resp.autoForward = { attempted: true, queued: true, target: autoForwardTarget, state: 'pending', maxAttempts: retryCfg.retries + 1 };
         }
         if (customResponse) {
           const h = { 'access-control-allow-origin': '*', 'x-hookkeep-event-id': eventId };
@@ -827,6 +868,8 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           name: 'Default inbox',
           forwardUrl: '',
           autoForward: false,
+          forwardRetries: 0,
+          forwardBackoffMs: 1000,
           alertKeyword: '',
           alertEmail: ws.email || '',
           notifyWebhookUrl: '',
@@ -888,6 +931,8 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           name: String(body.name || `Inbox ${ids.length + 1}`).slice(0, 80),
           forwardUrl: '',
           autoForward: false,
+          forwardRetries: 0,
+          forwardBackoffMs: 1000,
           alertKeyword: '',
           alertEmail: ws.email || '',
           notifyWebhookUrl: '',
@@ -924,9 +969,12 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
         if (!sp.ok) return json({ error: sp.error, message: sp.message }, 400);
         const dp = normalizeDedupePatch(body);
         if (!dp.ok) return json({ error: dp.error, message: dp.message }, 400);
+        const fp = normalizeForwardRetryPatch(body);
+        if (!fp.ok) return json({ error: fp.error, message: fp.message }, 400);
         Object.assign(inbox, rp.patch);
         Object.assign(inbox, sp.patch);
         Object.assign(inbox, dp.patch);
+        Object.assign(inbox, fp.patch);
         if (body.name != null) inbox.name = String(body.name).slice(0, 80);
         if (body.forwardUrl != null) inbox.forwardUrl = String(body.forwardUrl).slice(0, 500);
         if (body.autoForward != null) inbox.autoForward = Boolean(body.autoForward);
@@ -959,6 +1007,7 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           statusMinRaw === null || statusMinRaw === '' ? null : Number(statusMinRaw);
         const sig = url.searchParams.get('sig') || '';
         const pinned = url.searchParams.get('pinned') || '';
+        const forward = url.searchParams.get('forward') || '';
         const raw = await collectFilteredEvents(kv, inboxId, limits, {
           q,
           methodFilter,
@@ -966,6 +1015,7 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           cap,
           sig,
           pinned,
+          forward,
         });
         const day = new Date().toISOString().slice(0, 10);
         const filename = `hookkeep-events-${inboxId}-${day}.${format}`;
@@ -987,6 +1037,8 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
             method: methodFilter || undefined,
             statusMin: statusMin == null || Number.isNaN(statusMin) ? undefined : statusMin,
             sig: sig || undefined,
+            pinned: pinned || undefined,
+            forward: forward || undefined,
             limit,
           },
           events: raw.map(toExportEvent),
@@ -1060,6 +1112,83 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           inboxId,
           target,
           filters,
+          attempted: results.length,
+          succeeded,
+          failed,
+          results,
+        };
+        return json(payload, payload.ok ? 200 : 207);
+      }
+
+      // Manual "retry failed forwards" (Node parity): one immediate attempt per failed auto-forward
+      const retryFwdMatch = path.match(/^\/api\/inboxes\/([^/]+)\/events\/retry-forwards$/);
+      if (retryFwdMatch && request.method === 'POST') {
+        const ws = await requireWs();
+        if (!ws) return json({ error: 'unauthorized' }, 401);
+        const inboxId = retryFwdMatch[1];
+        const inbox = await getInbox(kv, inboxId);
+        if (!inbox || inbox.workspaceId !== ws.id) return json({ error: 'not_found' }, 404);
+        const body = await bodyJson();
+        const HARD_MAX = 50;
+        const limits = TIERS[ws.tier] || TIERS.free;
+        const reqLimit = Math.min(Number(body.limit) || 50, HARD_MAX);
+        const q = String(body.q || '').toLowerCase();
+        const methodFilter = String(body.method || '').toUpperCase();
+        const statusMinRaw = body.statusMin;
+        const statusMin =
+          statusMinRaw === undefined || statusMinRaw === null || statusMinRaw === ''
+            ? null
+            : Number(statusMinRaw);
+        const includePending = body.includePending === true;
+        const keys = [];
+        const all = await collectFilteredEvents(kv, inboxId, limits, {
+          q,
+          methodFilter,
+          statusMin,
+          cap: limits.maxEventsKeep + (limits.maxPinned || 0),
+          outKeys: keys,
+        });
+        const override = String(body.targetUrl || '').trim();
+        const fallback = String(inbox.forwardUrl || '').trim();
+        const results = [];
+        let succeeded = 0;
+        let failed = 0;
+        for (let i = 0; i < all.length && results.length < reqLimit; i++) {
+          const ev = all[i];
+          const st = forwardStateOf(ev);
+          if (!(st === 'failed' || (includePending && st === 'pending'))) continue;
+          const target = override || fallback || String((ev.autoForward && ev.autoForward.target) || '').trim();
+          if (!target) {
+            results.push({ id: ev.id, ok: false, error: 'no_forward_url', state: st });
+            failed += 1;
+            continue;
+          }
+          const r = await forwardCapturedEvent(ev, target, {
+            timeoutMs: 8000,
+            auto: true,
+            attempt: ((ev.autoForward && ev.autoForward.attemptCount) || 1) + 1,
+          });
+          const { record } = applyForwardAttempt(ev.autoForward, r, { manual: true });
+          ev.autoForward = record;
+          await kv.put(keys[i], JSON.stringify(ev));
+          const compact = { id: ev.id, ok: Boolean(r && r.ok), state: record.state, target };
+          if (r && r.status != null) compact.status = r.status;
+          if (r && r.ms != null) compact.ms = r.ms;
+          if (r && !r.ok) compact.error = r.error || 'forward_failed';
+          results.push(compact);
+          if (compact.ok) succeeded += 1;
+          else failed += 1;
+        }
+        const payload = {
+          ok: failed === 0,
+          inboxId,
+          filters: {
+            q: q || undefined,
+            method: methodFilter || undefined,
+            statusMin: statusMin == null || Number.isNaN(statusMin) ? undefined : statusMin,
+            limit: reqLimit,
+            includePending: includePending || undefined,
+          },
           attempted: results.length,
           succeeded,
           failed,
@@ -1147,6 +1276,7 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           cap,
           sig: url.searchParams.get('sig') || '',
           pinned: url.searchParams.get('pinned') || '',
+          forward: url.searchParams.get('forward') || '',
         });
         return json({ events: raw.map(summarizeEvent) });
       }

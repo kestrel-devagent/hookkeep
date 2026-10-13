@@ -73,7 +73,7 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
 - `POST /api/workspace` → create workspace + first inbox + owner token
 - `POST /hook/:inboxId` → **public ingest** (any method)
 - `GET /api/workspace` + header `x-hookkeep-token`
-- `PATCH /api/inboxes/:id` `{ name?, forwardUrl?, autoForward?, alertKeyword?, alertEmail?, notifyWebhookUrl?, responseStatus?, responseBody?, responseContentType?, signingScheme?, signingSecret?, signingHeader?, dedupeMode?, dedupeHeader? }`
+- `PATCH /api/inboxes/:id` `{ name?, forwardUrl?, autoForward?, alertKeyword?, alertEmail?, notifyWebhookUrl?, responseStatus?, responseBody?, responseContentType?, signingScheme?, signingSecret?, signingHeader?, dedupeMode?, dedupeHeader?, forwardRetries?, forwardBackoffMs? }`
 - **Custom ingest response** — set `responseStatus` (200–599; `0`/`null` = default JSON ack), optional `responseBody` (≤10k chars,
   placeholders `{{eventId}}` `{{method}}` `{{receivedAt}}` `{{json.some.path}}`) and `responseContentType` (auto JSON/text when blank).
   `/hook/:inboxId` then answers exactly that (204/205/304 send no body) plus header `x-hookkeep-event-id`. Use it to make the
@@ -115,8 +115,8 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
   (first 200 changes, values previewed to 200 chars). Errors: 404 `no_baseline` / `against_not_found` / `not_found`, 400 `same_event` /
   `bad_ignore`. Read-only, free tier OK. Shared `src/event-diff.js` (Node + Workers). Dashboard: event detail **⇄ Compare with another
   event** (previous / pinned / recent picker, ignore paths, all-headers toggle, colored +/−/~ list).
-- `GET /api/inboxes/:id/events?q=&method=&statusMin=&sig=&pinned=` (text / HTTP method / status ≥ N / signature `valid|invalid|unchecked` / `pinned=1|0`)
-- `GET /api/inboxes/:id/events/export?format=json|csv&q=&method=&statusMin=&sig=&pinned=&limit=` → bulk download of the **current filtered** set (same filters/cap as list; free tier OK; JSON rows carry `signature`, CSV adds `signatureValid,signatureReason,pinned,note,dedupeKey`)
+- `GET /api/inboxes/:id/events?q=&method=&statusMin=&sig=&pinned=` (text / HTTP method / status ≥ N / signature `valid|invalid|unchecked` / `pinned=1|0` / auto-forward `forward=failed|pending|delivered|none`)
+- `GET /api/inboxes/:id/events/export?format=json|csv&q=&method=&statusMin=&sig=&pinned=&forward=&limit=` → bulk download of the **current filtered** set (same filters/cap as list; free tier OK; JSON rows carry `signature`, CSV adds `signatureValid,signatureReason,pinned,note,dedupeKey,forwardState,forwardAttempts`)
 - `POST /api/inboxes/:id/events/replay-bulk` `{ targetUrl?, q?, method?, statusMin?, limit? }` → serially replay the **current filtered** set via the same forward path (default/hard max 50; free tier OK). Target = `targetUrl` else inbox `forwardUrl`; neither → 400 `no_forward_url`.
 - `POST /api/inboxes/:id/events/delete-bulk` `{ q?, method?, statusMin?, limit?, confirm: true, includePinned? }` → delete the **current filtered** set (same filters; default/hard max 50; free tier OK; pinned events skipped unless `includePinned: true`). Missing `confirm: true` → 400 `confirm_required`. Returns `{ ok, inboxId, filters, deleted, ids }`; inbox `eventCount` decremented.
 - `GET /api/inboxes/:id/alerts?limit=20` → recent Pro alert records
@@ -126,6 +126,27 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
   captured request is POSTed to `forwardUrl` (same headers/body as replay, ~8s timeout).
   Result is stored on the event as `autoForward: { ok, status, ms, error?, target }` and
   returned on the ingest response. Available on free tier (core job — not soft-paywalled).
+- **Auto-forward retries with backoff** — `PATCH /api/inboxes/:id` `{ forwardRetries: 0–5, forwardBackoffMs: 100–60000 }`
+  (defaults 0 / 1000; `forwardBackoffMs: 0` = default). Your n8n/Zapier/backend endpoint blips for a minute and the provider
+  already got its 200 from Hookkeep — so Hookkeep owns the retry. Only transient failures retry: network error / timeout, HTTP 408,
+  425, 429, 5xx; any other 4xx, bad URL or bad protocol fails at once (`gaveUp: "non_retryable"`). Gap before retry *n* =
+  `forwardBackoffMs · 2^(n-1)`, each capped at 5 min (default schedule 1s, 2s, 4s, 8s, 16s; inbox responses include
+  `forwardSchedule`). Each forwarded request carries `x-hookkeep-attempt: <n>`. `event.autoForward` keeps the last attempt's
+  `{ ok, status, ms, target, error? }` plus `state: delivered|pending|failed`, `attempts[]` (`{ n, at, ok, status?, ms?, error?,
+  retryable, manual? }`, newest 12), `attemptCount`, `maxAttempts`, `nextAttemptAt` (pending) and `gaveUp: non_retryable|exhausted|budget`.
+  The ingest response reports attempt 1 plus `state` / `maxAttempts` / `nextAttemptAt`. Filter with `?forward=failed|pending|delivered|none`
+  on list + export (list rows carry `forwardState` + `forwardAttempts`; CSV adds trailing `forwardState,forwardAttempts`).
+  **Retry failed forwards:** `POST /api/inboxes/:id/events/retry-forwards` `{ targetUrl?, q?, method?, statusMin?, limit?, includePending? }`
+  → one immediate attempt per filtered event whose auto-forward ended `failed` (default/hard max 50, serial). Target = `targetUrl`, else
+  the inbox's **current** `forwardUrl` (so a fixed URL wins), else the event's original target. Returns `{ ok, attempted, succeeded,
+  failed, results: [{ id, ok, state, status?, error?, target }] }` (207 when any still fail). Bad config → 400 `bad_forward_retries` /
+  `bad_forward_backoff` (patch not applied). Free tier OK. **Runtime limits (honest):** Node runs attempt 1 in-request and later retries on
+  in-process timers; pending retries are re-armed at boot (`resumePendingForwards`), deleted/trimmed events cancel theirs. Workers runs
+  attempt 1 + retries inside `ctx.waitUntil` under a ~25s budget (Cloudflare cancels waitUntil work ~30s after the response) — a retry
+  that won't fit ends the event `failed` with `gaveUp: "budget"`; use *retry-forwards* to finish the job. Shared `src/forward-retry.js`
+  (Node + Workers). Dashboard: sidebar **Retries / backoff ms** under Auto-forward with the live schedule, `✓ fwd ×3` / `↻ fwd retrying` /
+  `✗ fwd ×3` badges, a *Forward failed / retrying / delivered / not forwarded* filter, **Retry failed forwards** button, and an attempts
+  timeline on the event detail.
 - `POST /api/unlock` `{ "code" }`
 - `POST /api/waitlist` `{ "email", "note?" }`
 - Operator: `npm run digest-waitlist` → mailto draft of waitlist + Stripe unlock path (no SMTP)

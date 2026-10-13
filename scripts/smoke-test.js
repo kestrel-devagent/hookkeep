@@ -1,5 +1,5 @@
 /** Local smoke test against a running server (default http://127.0.0.1:8787)
- * Steps: create → ingest → list → export → forwardUrl → replay → replay-bulk → delete-bulk → auto-forward → demo unlock → pro alerts → free tier → custom response → signature check → event pin → event diff → ingest dedupe
+ * Steps: create → ingest → list → export → forwardUrl → replay → replay-bulk → delete-bulk → auto-forward → demo unlock → pro alerts → free tier → custom response → signature check → event pin → event diff → ingest dedupe → auto-forward retries
  */
 import http from 'node:http';
 import { createHmac } from 'node:crypto';
@@ -35,12 +35,19 @@ function alertLines() {
 async function main() {
   // Tiny local catcher to receive replay forwards + notify webhook POSTs
   const caught = [];
+  const urlHits = new Map();
   const catcher = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => (body += c));
     req.on('end', () => {
-      caught.push({ url: req.url, body });
-      res.writeHead(200, { 'content-type': 'application/json' });
+      caught.push({ url: req.url, body, attempt: req.headers['x-hookkeep-attempt'] || null });
+      const n = (urlHits.get(req.url) || 0) + 1;
+      urlHits.set(req.url, n);
+      // /flaky-once/* answers 503 on the first hit (retry test); /gone/* always 410 (non-retryable)
+      let status = 200;
+      if (req.url.startsWith('/flaky-once/') && n === 1) status = 503;
+      if (req.url.startsWith('/gone/')) status = 410;
+      res.writeHead(status, { 'content-type': 'application/json' });
       res.end('{}');
     });
   });
@@ -160,7 +167,7 @@ async function main() {
   const expCsv = await expCsvRes.text();
   const csvLines = expCsv.trim().split(/\r?\n/);
   check(
-    csvLines[0] === 'id,receivedAt,method,status,contentType,bodyPreview,autoForwardOk,signatureValid,signatureReason,pinned,note,dedupeKey',
+    csvLines[0] === 'id,receivedAt,method,status,contentType,bodyPreview,autoForwardOk,signatureValid,signatureReason,pinned,note,dedupeKey,forwardState,forwardAttempts',
     'csv header mismatch'
   );
   check(csvLines.length >= 3, `csv expected header+rows, got ${csvLines.length}`);
@@ -666,6 +673,64 @@ async function main() {
     }).then((r) => r.json());
     check(ev.event?.dedupeKey && String(ev.event.dedupeKey).startsWith('sha256:'), 'event.dedupeKey missing');
     console.log('dedupe: bad mode 400 / body-hash hit same id / no count bump / headers + JSON deduped');
+  }
+
+  step('auto-forward retries');
+  {
+    const rc = await fetch(`${BASE}/api/workspace`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ label: 'retry-smoke' }),
+    }).then((r) => r.json());
+    const rAuth = { 'x-hookkeep-token': rc.ownerToken, 'content-type': 'application/json' };
+    const rPatch = (b) =>
+      fetch(`${BASE}/api/inboxes/${rc.inbox.id}`, { method: 'PATCH', headers: rAuth, body: JSON.stringify(b) });
+    const bad = await rPatch({ forwardRetries: 9 });
+    check(bad.status === 400 && (await bad.json()).error === 'bad_forward_retries', 'bad_forward_retries not 400');
+    const flakyUrl = `${catcherBase}/flaky-once/${rc.inbox.id}`;
+    const set = await rPatch({ forwardUrl: flakyUrl, autoForward: true, forwardRetries: 2, forwardBackoffMs: 150 }).then((r) => r.json());
+    check(set.inbox?.forwardRetries === 2 && JSON.stringify(set.inbox.forwardSchedule) === '[150,300]', `retry cfg ${JSON.stringify(set.inbox)}`);
+    const hookUrl = `${BASE}/hook/${rc.inbox.id}`;
+    const i1 = await fetch(hookUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ smoke: 'retry', n: 1 }),
+    }).then((r) => r.json());
+    check(i1.autoForward?.state === 'pending' && i1.autoForward.status === 503, `first attempt ${JSON.stringify(i1.autoForward)}`);
+    const pendingList = await fetch(`${BASE}/api/inboxes/${rc.inbox.id}/events?forward=pending`, { headers: rAuth }).then((r) => r.json());
+    check(pendingList.events.length === 1 && pendingList.events[0].forwardState === 'pending', 'forward=pending filter');
+    let ev1 = null;
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 50));
+      ev1 = (await fetch(`${BASE}/api/events/${i1.id}`, { headers: rAuth }).then((r) => r.json())).event;
+      if (ev1?.autoForward?.state === 'delivered') break;
+    }
+    check(ev1?.autoForward?.state === 'delivered', `retry not delivered: ${JSON.stringify(ev1?.autoForward)}`);
+    check(JSON.stringify(ev1.autoForward.attempts.map((a) => a.status)) === '[503,200]', 'attempt statuses');
+    const flakyHits = caught.filter((c) => c.url === `/flaky-once/${rc.inbox.id}`);
+    check(flakyHits.length === 2 && flakyHits[1].attempt === '2', `x-hookkeep-attempt ${JSON.stringify(flakyHits)}`);
+    // non-retryable 410 → failed at once, then manual retry-failed to a healthy target
+    await rPatch({ forwardUrl: `${catcherBase}/gone/${rc.inbox.id}` });
+    const i2 = await fetch(hookUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ smoke: 'retry', n: 2 }),
+    }).then((r) => r.json());
+    check(i2.autoForward?.state === 'failed', `410 should fail fast ${JSON.stringify(i2.autoForward)}`);
+    const failedList = await fetch(`${BASE}/api/inboxes/${rc.inbox.id}/events?forward=failed`, { headers: rAuth }).then((r) => r.json());
+    check(failedList.events.length === 1 && failedList.events[0].id === i2.id, 'forward=failed filter');
+    const rr = await fetch(`${BASE}/api/inboxes/${rc.inbox.id}/events/retry-forwards`, {
+      method: 'POST',
+      headers: rAuth,
+      body: JSON.stringify({ targetUrl: `${catcherBase}/healthy/${rc.inbox.id}` }),
+    });
+    const rrj = await rr.json();
+    check(rr.status === 200 && rrj.attempted === 1 && rrj.succeeded === 1, `retry-forwards ${JSON.stringify(rrj)}`);
+    const after = await fetch(`${BASE}/api/inboxes/${rc.inbox.id}/events?forward=failed`, { headers: rAuth }).then((r) => r.json());
+    check(after.events.length === 0, 'still failed after manual retry');
+    const csv = await fetch(`${BASE}/api/inboxes/${rc.inbox.id}/events/export?format=csv`, { headers: rAuth }).then((r) => r.text());
+    check(csv.includes(',delivered,2'), 'csv forwardState/forwardAttempts');
+    console.log('retries: bad cfg 400 / 503→pending→delivered (attempt header) / 410 fail-fast / forward filters / manual retry-failed / csv');
   }
 
   step('waitlist');

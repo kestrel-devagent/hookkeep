@@ -24,6 +24,16 @@ import {
   pinLimitFor,
 } from './event-pin.js';
 import { diffEvents, previousEvent } from './event-diff.js';
+import {
+  normalizeForwardRetryPatch,
+  publicForwardRetryConfig,
+  forwardRetryConfig,
+  startForwardRecord,
+  applyForwardAttempt,
+  forwardFilterMatch,
+  forwardStateOf,
+  publicForwardFields,
+} from './forward-retry.js';
 
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 12);
 const id16 = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 16);
@@ -103,6 +113,8 @@ function makeInbox(db, ws, { name = 'Inbox' } = {}) {
     name: String(name).slice(0, 80),
     forwardUrl: '',
     autoForward: false,
+    forwardRetries: 0,
+    forwardBackoffMs: 1000,
     alertKeyword: '',
     alertEmail: ws.email || '',
     notifyWebhookUrl: '',
@@ -216,9 +228,16 @@ export function updateInbox(ws, inboxId, patch) {
     err.code = dp.error;
     throw err;
   }
+  const fp = normalizeForwardRetryPatch(patch);
+  if (!fp.ok) {
+    const err = new Error(fp.message);
+    err.code = fp.error;
+    throw err;
+  }
   Object.assign(inbox, rp.patch);
   Object.assign(inbox, sp.patch);
   Object.assign(inbox, dp.patch);
+  Object.assign(inbox, fp.patch);
   if (patch.name != null) inbox.name = String(patch.name).slice(0, 80);
   if (patch.forwardUrl != null) inbox.forwardUrl = String(patch.forwardUrl).slice(0, 500);
   if (patch.autoForward != null) inbox.autoForward = Boolean(patch.autoForward);
@@ -257,6 +276,7 @@ export function ingestEvent(inboxId, { method, headers, bodyText, contentType, s
         alert: null,
         overMonth: ws.eventsThisMonth > limits.maxEventsMonth,
         autoForwardTarget: null,
+        autoForwardRetry: null,
         customResponse,
       };
     }
@@ -310,6 +330,7 @@ export function ingestEvent(inboxId, { method, headers, bodyText, contentType, s
     .sort((a, b) => (a.receivedAt < b.receivedAt ? 1 : -1));
   for (const old of rowsToTrim(inboxEvents, keep)) {
     forgetDedupeForEvent(inbox, old.id);
+    cancelForwardRetry(old.id);
     delete db.events[old.id];
   }
 
@@ -342,6 +363,7 @@ export function ingestEvent(inboxId, { method, headers, bodyText, contentType, s
     alert,
     overMonth: ws.eventsThisMonth > limits.maxEventsMonth,
     autoForwardTarget,
+    autoForwardRetry: autoForwardTarget ? forwardRetryConfig(inbox) : null,
     customResponse,
   };
 }
@@ -499,7 +521,7 @@ const BODY_EXPORT_MAX = 8192;
 const BODY_CSV_PREVIEW = 200;
 
 /** Shared filter + keep-cap for listEvents / exportEvents (same semantics). */
-function queryInboxEvents(ws, inboxId, { q = '', method = '', statusMin = null, limit = 50, sig = '', pinned = '' } = {}) {
+function queryInboxEvents(ws, inboxId, { q = '', method = '', statusMin = null, limit = 50, sig = '', pinned = '', forward = '' } = {}) {
   const db = read();
   const inbox = db.inboxes[inboxId];
   if (!inbox || inbox.workspaceId !== ws.id) return null;
@@ -530,6 +552,7 @@ function queryInboxEvents(ws, inboxId, { q = '', method = '', statusMin = null, 
   }
   if (sig) rows = rows.filter((e) => signatureFilterMatch(e, sig));
   if (pinned !== '' && pinned != null) rows = rows.filter((e) => pinnedFilterMatch(e, pinned));
+  if (forward) rows = rows.filter((e) => forwardFilterMatch(e, forward));
   const cap = Math.min(Number(limit) || 50, limits.maxEventsKeep + pinLimitFor(ws.tier));
   return { rows: rows.slice(0, cap), inbox, limits, cap };
 }
@@ -578,7 +601,12 @@ export function toExportEvent(e) {
       ms: e.autoForward.ms ?? null,
       error: e.autoForward.error || null,
       target: e.autoForward.target || null,
+      state: forwardStateOf(e),
+      attemptCount: e.autoForward.attemptCount != null ? e.autoForward.attemptCount : 1,
     };
+    if (Array.isArray(e.autoForward.attempts)) out.autoForward.attempts = e.autoForward.attempts;
+    if (e.autoForward.nextAttemptAt) out.autoForward.nextAttemptAt = e.autoForward.nextAttemptAt;
+    if (e.autoForward.gaveUp) out.autoForward.gaveUp = e.autoForward.gaveUp;
   }
   return out;
 }
@@ -603,6 +631,8 @@ export function eventsToCsv(events) {
     'pinned',
     'note',
     'dedupeKey',
+    'forwardState',
+    'forwardAttempts',
   ];
   const lines = [header.join(',')];
   for (const e of events) {
@@ -629,6 +659,8 @@ export function eventsToCsv(events) {
         escapeCsvField(e.pinned ? 'true' : ''),
         escapeCsvField(e.note || ''),
         escapeCsvField(e.dedupeKey || ''),
+        escapeCsvField(forwardStateOf(e) || ''),
+        escapeCsvField(publicForwardFields(e).forwardAttempts || ''),
       ].join(',')
     );
   }
@@ -659,7 +691,7 @@ export function getEvent(ws, eventId) {
  * timeoutMs defaults to 15s (manual replay); auto-forward uses ~8s like alerts.
  * Never throws — returns { ok, status?, ms, error?, message?, bodyPreview?, target }.
  */
-export async function forwardCapturedEvent(ev, url, { timeoutMs = 15_000, auto = false } = {}) {
+export async function forwardCapturedEvent(ev, url, { timeoutMs = 15_000, auto = false, attempt = null } = {}) {
   const target = String(url || '').trim();
   if (!target) return { ok: false, error: 'no_forward_url' };
   let dest;
@@ -686,6 +718,7 @@ export async function forwardCapturedEvent(ev, url, { timeoutMs = 15_000, auto =
   headers['x-hookkeep-replay'] = '1';
   headers['x-hookkeep-event-id'] = ev.id;
   if (auto) headers['x-hookkeep-auto-forward'] = '1';
+  if (attempt != null) headers['x-hookkeep-attempt'] = String(attempt);
 
   const started = Date.now();
   try {
@@ -714,42 +747,157 @@ export async function forwardCapturedEvent(ev, url, { timeoutMs = 15_000, auto =
   }
 }
 
-/** Persist auto-forward attempt result on the stored event (dashboard detail). */
-export function setEventAutoForward(eventId, result) {
+// ---- Auto-forward with retries (shared src/forward-retry.js) ----
+// Node: attempt 1 runs in-request (ingest response reports it). Retries run in the background on
+// timers; each attempt is persisted on event.autoForward. Pending retries survive a restart via
+// resumePendingForwards() (called at server boot).
+const forwardTimers = new Map();
+
+function scheduleForwardRetry(eventId, delayMs) {
+  clearTimeout(forwardTimers.get(eventId));
+  const t = setTimeout(() => {
+    forwardTimers.delete(eventId);
+    continueAutoForward(eventId).catch(() => {});
+  }, Math.max(0, delayMs));
+  forwardTimers.set(eventId, t);
+}
+
+function cancelForwardRetry(eventId) {
+  const t = forwardTimers.get(eventId);
+  if (t) clearTimeout(t);
+  forwardTimers.delete(eventId);
+}
+
+/** Number of automatic retries currently scheduled in this process. */
+export function pendingForwardTimers() {
+  return forwardTimers.size;
+}
+
+/** Fold an attempt into the stored event (fresh read → write; no await in between). */
+function persistForwardAttempt(eventId, result, { manual = false, initial = null } = {}) {
   const db = read();
   const ev = db.events[eventId];
   if (!ev) return null;
-  const record = {
-    ok: Boolean(result && result.ok),
-    status: result && result.status != null ? result.status : undefined,
-    ms: result && result.ms != null ? result.ms : undefined,
-    target: result && result.target ? String(result.target).slice(0, 500) : undefined,
-  };
-  if (result && result.error) record.error = String(result.error).slice(0, 80);
-  if (result && result.message && !result.ok) {
-    record.message = String(result.message).slice(0, 200);
-  }
-  // Drop undefined keys for a clean JSON store
-  for (const k of Object.keys(record)) {
-    if (record[k] === undefined) delete record[k];
-  }
+  const prev = initial || ev.autoForward || null;
+  const { record, nextDelayMs } = applyForwardAttempt(prev, result, { manual });
   ev.autoForward = record;
   write(db);
+  if (nextDelayMs != null) scheduleForwardRetry(eventId, nextDelayMs);
+  else cancelForwardRetry(eventId);
   return record;
 }
 
+/** Back-compat helper: record a single attempt result (no retry config). */
+export function setEventAutoForward(eventId, result) {
+  return persistForwardAttempt(eventId, result, {
+    initial: startForwardRecord({ target: result && result.target }),
+  });
+}
+
 /**
- * Best-effort auto-forward after ingest (~8s timeout like alerts).
- * Returns the persisted autoForward record, or null if skipped.
+ * Auto-forward after ingest (~8s timeout like alerts). retry = { retries, backoffMs } from the inbox.
+ * Returns the persisted autoForward record (state pending when a retry is scheduled), or null if skipped.
  */
-export async function runAutoForward(eventId, targetUrl) {
+export async function runAutoForward(eventId, targetUrl, retry = null) {
   const db = read();
   const ev = db.events[eventId];
   if (!ev) return null;
   const url = String(targetUrl || '').trim();
   if (!url) return null;
-  const result = await forwardCapturedEvent(ev, url, { timeoutMs: 8000, auto: true });
-  return setEventAutoForward(eventId, result);
+  const cfg = retry || { retries: 0, backoffMs: 1000 };
+  const initial = startForwardRecord({ target: url, retries: cfg.retries, backoffMs: cfg.backoffMs });
+  const result = await forwardCapturedEvent(ev, url, { timeoutMs: 8000, auto: true, attempt: 1 });
+  return persistForwardAttempt(eventId, result, { initial });
+}
+
+/** Run the next automatic retry for a pending event (timer callback; exported for tests). */
+export async function continueAutoForward(eventId) {
+  const db = read();
+  const ev = db.events[eventId];
+  if (!ev || !ev.autoForward || ev.autoForward.state !== 'pending') return null;
+  const af = ev.autoForward;
+  const result = await forwardCapturedEvent(ev, af.target, {
+    timeoutMs: 8000,
+    auto: true,
+    attempt: (af.attemptCount || 0) + 1,
+  });
+  // The event may have been trimmed/deleted or manually retried while we were waiting on the network
+  const live = read().events[eventId];
+  if (!live || !live.autoForward || live.autoForward.state !== 'pending') return null;
+  return persistForwardAttempt(eventId, result);
+}
+
+/** Re-arm timers for pending retries after a restart (overdue ones fire soon, staggered). */
+export function resumePendingForwards({ max = 200 } = {}) {
+  const db = read();
+  const now = Date.now();
+  let n = 0;
+  for (const ev of Object.values(db.events)) {
+    if (n >= max) break;
+    const af = ev.autoForward;
+    if (!af || af.state !== 'pending' || forwardTimers.has(ev.id)) continue;
+    const due = af.nextAttemptAt ? Date.parse(af.nextAttemptAt) : now;
+    scheduleForwardRetry(ev.id, Math.max(0, (Number.isFinite(due) ? due : now) - now) + n * 50);
+    n += 1;
+  }
+  return n;
+}
+
+/**
+ * Manual "retry failed forwards": one immediate attempt for each filtered event whose auto-forward
+ * ended failed (includePending also takes over scheduled ones). Hard max 50, serial.
+ * Target = body.targetUrl || the inbox's current forwardUrl (so a fixed URL wins) || the event's original target.
+ */
+export async function retryFailedForwards(
+  ws,
+  inboxId,
+  { targetUrl, q = '', method = '', statusMin = null, limit = 50, includePending = false } = {}
+) {
+  const HARD_MAX = 50;
+  const reqLimit = Math.min(Number(limit) || 50, HARD_MAX);
+  const hit = queryInboxEvents(ws, inboxId, { q, method, statusMin, limit: 100000 });
+  if (!hit) return null;
+  const rows = hit.rows
+    .filter((e) => {
+      const s = forwardStateOf(e);
+      return s === 'failed' || (includePending && s === 'pending');
+    })
+    .slice(0, reqLimit);
+  const override = String(targetUrl || '').trim();
+  const fallback = String((hit.inbox && hit.inbox.forwardUrl) || '').trim();
+  const filters = {
+    q: q || undefined,
+    method: method || undefined,
+    statusMin: statusMin == null || statusMin === '' || Number.isNaN(Number(statusMin)) ? undefined : Number(statusMin),
+    limit: reqLimit,
+    includePending: includePending || undefined,
+  };
+  const results = [];
+  let succeeded = 0;
+  let failed = 0;
+  for (const row of rows) {
+    const target = override || fallback || String((row.autoForward && row.autoForward.target) || '').trim();
+    if (!target) {
+      results.push({ id: row.id, ok: false, error: 'no_forward_url', state: forwardStateOf(row) });
+      failed += 1;
+      continue;
+    }
+    cancelForwardRetry(row.id);
+    const r = await forwardCapturedEvent(row, target, {
+      timeoutMs: 8000,
+      auto: true,
+      attempt: ((row.autoForward && row.autoForward.attemptCount) || 1) + 1,
+    });
+    const rec = persistForwardAttempt(row.id, r, { manual: true });
+    const compact = { id: row.id, ok: Boolean(r && r.ok), state: rec ? rec.state : null, target };
+    if (r && r.status != null) compact.status = r.status;
+    if (r && r.ms != null) compact.ms = r.ms;
+    if (r && !r.ok) compact.error = r.error || 'forward_failed';
+    results.push(compact);
+    if (compact.ok) succeeded += 1;
+    else failed += 1;
+  }
+  return { ok: failed === 0, inboxId, filters, attempted: results.length, succeeded, failed, results };
 }
 
 export async function replayEvent(ws, eventId, { targetUrl } = {}) {
@@ -854,6 +1002,7 @@ export function deleteEventsBulk(
   for (const row of hit.rows) {
     if (db.events[row.id] && db.events[row.id].inboxId === inboxId) {
       if (inbox) forgetDedupeForEvent(inbox, row.id);
+      cancelForwardRetry(row.id);
       delete db.events[row.id];
       ids.push(row.id);
     }
@@ -1003,6 +1152,7 @@ function publicInbox(inbox) {
     ...publicResponseConfig(inbox),
     ...publicSignatureConfig(inbox),
     ...publicDedupeConfig(inbox),
+    ...publicForwardRetryConfig(inbox),
     eventCount: inbox.eventCount || 0,
     createdAt: inbox.createdAt,
   };
@@ -1022,6 +1172,7 @@ function summarizeEvent(e) {
     respondedCustom: Boolean(e.respondedCustom),
     signature: e.signature || null,
     dedupeKey: e.dedupeKey || null,
+    ...publicForwardFields(e),
     ...publicPinFields(e),
   };
 }
