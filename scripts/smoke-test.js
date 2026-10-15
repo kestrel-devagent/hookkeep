@@ -1,5 +1,5 @@
 /** Local smoke test against a running server (default http://127.0.0.1:8787)
- * Steps: create → ingest → list → export → forwardUrl → replay → replay-bulk → delete-bulk → auto-forward → demo unlock → pro alerts → free tier → custom response → signature check → event pin → event diff → ingest dedupe → auto-forward retries
+ * Steps: create → ingest → list → export → forwardUrl → replay → replay-bulk → delete-bulk → auto-forward → demo unlock → pro alerts → free tier → custom response → signature check → event pin → event diff → ingest dedupe → auto-forward retries → inbox stats
  */
 import http from 'node:http';
 import { createHmac } from 'node:crypto';
@@ -731,6 +731,40 @@ async function main() {
     const csv = await fetch(`${BASE}/api/inboxes/${rc.inbox.id}/events/export?format=csv`, { headers: rAuth }).then((r) => r.text());
     check(csv.includes(',delivered,2'), 'csv forwardState/forwardAttempts');
     console.log('retries: bad cfg 400 / 503→pending→delivered (attempt header) / 410 fail-fast / forward filters / manual retry-failed / csv');
+  }
+
+
+  step('inbox stats');
+  {
+    const sc = await fetch(`${BASE}/api/workspace`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'stats-smoke@example.com', label: 'stats' }),
+    }).then((r) => r.json());
+    const sAuth = { 'x-hookkeep-token': sc.ownerToken, 'content-type': 'application/json' };
+    const hookUrl = `${BASE}/hook/${sc.inbox.id}`;
+    const bad = await fetch(`${BASE}/api/inboxes/${sc.inbox.id}/stats?window=month`, { headers: sAuth });
+    check(bad.status === 400 && (await bad.json()).error === 'bad_window', 'bad_window not 400');
+    const unauth = await fetch(`${BASE}/api/inboxes/${sc.inbox.id}/stats`);
+    check(unauth.status === 401, 'stats unauth not 401');
+    await fetch(hookUrl, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ status: 200, smoke: 'stats', n: 1 }),
+    });
+    await fetch(hookUrl, {
+      method: 'GET',
+    });
+    const def = await fetch(`${BASE}/api/inboxes/${sc.inbox.id}/stats`, { headers: sAuth }).then((r) => r.json());
+    check(def.ok === true && def.window === '24h' && def.total === 2, `default stats ${JSON.stringify(def)}`);
+    check(def.byMethod?.POST === 1 && def.byMethod?.GET === 1, `byMethod ${JSON.stringify(def.byMethod)}`);
+    check(def.byStatusBucket?.['2xx'] === 1 && def.byStatusBucket?.other >= 0, 'status buckets');
+    check(def.windowStartedAt && def.generatedAt && def.inboxId === sc.inbox.id, 'stats meta');
+    const all = await fetch(`${BASE}/api/inboxes/${sc.inbox.id}/stats?window=all`, { headers: sAuth }).then((r) => r.json());
+    check(all.window === 'all' && all.windowStartedAt === null && all.total === 2, `window=all ${JSON.stringify(all)}`);
+    const h1 = await fetch(`${BASE}/api/inboxes/${sc.inbox.id}/stats?window=1h`, { headers: sAuth }).then((r) => r.json());
+    check(h1.window === '1h' && h1.total === 2, 'window=1h');
+    console.log('stats: bad_window 400 / default 24h / byMethod / window=all');
   }
 
   step('waitlist');

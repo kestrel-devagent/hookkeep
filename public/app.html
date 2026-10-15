@@ -131,6 +131,20 @@
             <input id="dedupe-header" type="text" placeholder="idempotency-key" style="width:100%;margin:0.35rem 0" />
           </div>
         </details>
+        <details id="stats-panel" style="margin:0.5rem 0" open>
+          <summary class="muted" style="cursor:pointer;font-size:0.8rem">Stats <span id="stats-badge" class="muted"></span></summary>
+          <div style="display:flex;gap:0.35rem;align-items:center;margin:0.35rem 0">
+            <label class="muted" style="font-size:0.75rem;white-space:nowrap" for="stats-window">Window</label>
+            <select id="stats-window" style="flex:1;min-width:0">
+              <option value="1h">1 hour</option>
+              <option value="24h" selected>24 hours</option>
+              <option value="7d">7 days</option>
+              <option value="all">All</option>
+            </select>
+            <button class="btn btn-sm" type="button" id="btn-stats-refresh" title="Refresh stats">↻</button>
+          </div>
+          <pre id="stats-body" class="fine" style="font-size:0.72rem;margin:0.25rem 0;white-space:pre-wrap;max-height:12rem;overflow:auto;background:var(--bg-elevated, transparent);padding:0.35rem;border-radius:4px;border:1px solid var(--border)">—</pre>
+        </details>
         <button class="btn btn-sm" id="btn-save-inbox" style="width:100%;margin-top:0.35rem;justify-content:center">Save inbox</button>
         <p class="fine" style="font-size:0.75rem;margin-top:0.75rem">Data persists while the host keeps <code>HOOKKEEP_DATA</code> mounted — see DEPLOY.md.</p>
       </aside>
@@ -454,8 +468,42 @@ function forwardBadge(e) {
   return ` <span title="Auto-forward failed after ${n} attempt${n === 1 ? '' : 's'}" style="color:var(--danger);font-size:0.72rem">✗ fwd${x}</span>`;
 }
 
+
+async function loadStats() {
+  const body = $('stats-body');
+  const badge = $('stats-badge');
+  if (!body || !state.activeInboxId) return;
+  const window = ($('stats-window') && $('stats-window').value) || '24h';
+  try {
+    const s = await api(`/api/inboxes/${state.activeInboxId}/stats?window=${encodeURIComponent(window)}`);
+    if (!s || !s.ok) {
+      body.textContent = (s && s.error) || 'failed';
+      if (badge) badge.textContent = '';
+      return;
+    }
+    if (badge) badge.textContent = `· ${s.total} in ${s.window}`;
+    const methods = Object.entries(s.byMethod || {}).map(([k, v]) => `${k} ${v}`).join(' · ') || '—';
+    const sb = s.byStatusBucket || {};
+    const fb = s.byForwardState || {};
+    const sg = s.bySignature || {};
+    body.textContent = [
+      `total ${s.total} · pinned ${s.pinned}`,
+      `method  ${methods}`,
+      `status  2xx ${sb['2xx']||0} · 3xx ${sb['3xx']||0} · 4xx ${sb['4xx']||0} · 5xx ${sb['5xx']||0} · other ${sb.other||0}`,
+      `forward delivered ${fb.delivered||0} · pending ${fb.pending||0} · failed ${fb.failed||0} · none ${fb.none||0}`,
+      `sig     valid ${sg.valid||0} · invalid ${sg.invalid||0} · unchecked ${sg.unchecked||0}`,
+      s.oldestReceivedAt ? `oldest  ${new Date(s.oldestReceivedAt).toLocaleString()}` : 'oldest  —',
+      s.newestReceivedAt ? `newest  ${new Date(s.newestReceivedAt).toLocaleString()}` : 'newest  —',
+    ].join('\n');
+  } catch (e) {
+    body.textContent = String(e.message || e);
+    if (badge) badge.textContent = '';
+  }
+}
+
 async function loadEvents() {
   if (!state.activeInboxId) return;
+  loadStats();
   const q = $('search').value.trim();
   const method = ($('filter-method') && $('filter-method').value) || '';
   const statusMin = ($('filter-status-min') && $('filter-status-min').value.trim()) || '';

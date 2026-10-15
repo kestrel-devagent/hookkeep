@@ -147,6 +147,13 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
   (Node + Workers). Dashboard: sidebar **Retries / backoff ms** under Auto-forward with the live schedule, `✓ fwd ×3` / `↻ fwd retrying` /
   `✗ fwd ×3` badges, a *Forward failed / retrying / delivered / not forwarded* filter, **Retry failed forwards** button, and an attempts
   timeline on the event detail.
+- **Inbox stats** — `GET /api/inboxes/:id/stats?window=1h|24h|7d|all` (default `24h`; same owner-token auth).
+  Counts events whose `receivedAt` falls in the window: `total`, `pinned`, `byMethod`, `byStatusBucket`
+  (`2xx`/`3xx`/`4xx`/`5xx`/`other` from `statusGuess`), `byForwardState` (`delivered`/`pending`/`failed`/`none`
+  via `forwardStateOf`), `bySignature` (`valid`/`invalid`/`unchecked`), plus `oldestReceivedAt` /
+  `newestReceivedAt` / `windowStartedAt` (null when `window=all`) / `generatedAt`. Bad window → 400
+  `bad_window`. Free tier OK. Shared `src/inbox-stats.js` (Node + Workers). Dashboard: compact **Stats**
+  panel with a window selector.
 - `POST /api/unlock` `{ "code" }`
 - `POST /api/waitlist` `{ "email", "note?" }`
 - Operator: `npm run digest-waitlist` → mailto draft of waitlist + Stripe unlock path (no SMTP)

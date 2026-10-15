@@ -50,6 +50,7 @@ import {
   publicForwardFields,
   WORKERS_RETRY_BUDGET_MS,
 } from '../../src/forward-retry.js';
+import { computeInboxStats, parseStatsWindow } from '../../src/inbox-stats.js';
 
 const TIERS = {
   free: { name: 'Free', maxInboxes: 1, maxEventsKeep: 50, maxEventsMonth: 500, alerts: false, maxPinned: 5 },
@@ -984,6 +985,27 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           inbox.notifyWebhookUrl = String(body.notifyWebhookUrl).slice(0, 500);
         await kv.put(`inbox:${inbox.id}`, JSON.stringify(inbox));
         return json({ inbox: { ...publicInbox(inbox), webhookUrl: `${baseUrl(request, env)}/hook/${inbox.id}` } });
+      }
+
+
+      const statsMatch = path.match(/^\/api\/inboxes\/([^/]+)\/stats$/);
+      if (statsMatch && request.method === 'GET') {
+        const ws = await requireWs();
+        if (!ws) return json({ error: 'unauthorized' }, 401);
+        const parsed = parseStatsWindow(url.searchParams.get('window'));
+        if (!parsed.ok) return json({ error: 'bad_window' }, 400);
+        const inboxId = statsMatch[1];
+        const inbox = await getInbox(kv, inboxId);
+        if (!inbox || inbox.workspaceId !== ws.id) return json({ error: 'not_found' }, 404);
+        const limits = TIERS[ws.tier] || TIERS.free;
+        const cap = limits.maxEventsKeep + (limits.maxPinned || 0);
+        const listed = await kv.list({ prefix: `evt:${inboxId}:`, limit: cap });
+        const events = [];
+        for (const k of listed.keys) {
+          const ev = await kv.get(k.name, 'json');
+          if (ev) events.push(ev);
+        }
+        return json(computeInboxStats(events, { inboxId, window: parsed.window }));
       }
 
       const exportMatch = path.match(/^\/api\/inboxes\/([^/]+)\/events\/export$/);

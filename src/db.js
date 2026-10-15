@@ -34,6 +34,7 @@ import {
   forwardStateOf,
   publicForwardFields,
 } from './forward-retry.js';
+import { computeInboxStats, parseStatsWindow } from './inbox-stats.js';
 
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 12);
 const id16 = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 16);
@@ -519,6 +520,18 @@ export function listAlerts(ws, inboxId, { limit = 20 } = {}) {
 
 const BODY_EXPORT_MAX = 8192;
 const BODY_CSV_PREVIEW = 200;
+
+/** Per-inbox stats for GET /api/inboxes/:id/stats. Returns null if inbox missing; {ok:false,error} on bad window. */
+export function inboxStats(ws, inboxId, { window = '24h', now = Date.now() } = {}) {
+  const db = read();
+  const inbox = db.inboxes[inboxId];
+  if (!inbox || inbox.workspaceId !== ws.id) return null;
+  const parsed = parseStatsWindow(window);
+  if (!parsed.ok) return parsed;
+  const events = Object.values(db.events).filter((e) => e.inboxId === inboxId);
+  return computeInboxStats(events, { inboxId, window: parsed.window, now });
+}
+
 
 /** Shared filter + keep-cap for listEvents / exportEvents (same semantics). */
 function queryInboxEvents(ws, inboxId, { q = '', method = '', statusMin = null, limit = 50, sig = '', pinned = '', forward = '' } = {}) {

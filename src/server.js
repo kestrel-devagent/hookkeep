@@ -12,6 +12,7 @@ import * as db from './db.js';
 import { verifySignature } from './signature.js';
 import { computeDedupeKey } from './dedupe.js';
 import { diffOptionsFromQuery } from './event-diff.js';
+import { parseStatsWindow } from './inbox-stats.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -186,6 +187,18 @@ app.patch('/api/inboxes/:id', async (c) => {
   }
   if (!inbox) return c.json({ error: 'not_found' }, 404);
   return c.json({ inbox: { ...inbox, webhookUrl: `${baseUrl(c)}/hook/${inbox.id}` } });
+});
+
+
+app.get('/api/inboxes/:id/stats', (c) => {
+  const ws = requireWs(c);
+  if (!ws) return c.json({ error: 'unauthorized' }, 401);
+  const parsed = parseStatsWindow(c.req.query('window'));
+  if (!parsed.ok) return c.json({ error: 'bad_window' }, 400);
+  const stats = db.inboxStats(ws, c.req.param('id'), { window: parsed.window });
+  if (!stats) return c.json({ error: 'not_found' }, 404);
+  if (stats.ok === false) return c.json({ error: stats.error || 'bad_window' }, 400);
+  return c.json(stats);
 });
 
 app.get('/api/inboxes/:id/events/export', (c) => {
