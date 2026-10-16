@@ -218,7 +218,7 @@ const db = await import('../src/db.js');
   const exp = db.exportEvents(ws, inboxId, { limit: 500 });
   assert.ok(exp.events.some((e) => e.dedupeKey === hashKey));
   const csv = db.eventsToCsv(exp.raw);
-  assert.ok(csv.split('\n')[0].endsWith(',dedupeKey,forwardState,forwardAttempts'));
+  assert.ok(csv.split('\n')[0].endsWith(',dedupeKey,forwardState,forwardAttempts,redactedHeaders,redactedJsonPaths'));
   assert.ok(csv.includes(hashKey));
 
   // clear

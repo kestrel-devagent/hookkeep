@@ -180,7 +180,7 @@ app.patch('/api/inboxes/:id', async (c) => {
   try {
     inbox = db.updateInbox(ws, c.req.param('id'), body);
   } catch (e) {
-    if (['bad_response_status', 'bad_signing_scheme', 'bad_signing_secret', 'bad_signing_header', 'bad_dedupe_mode', 'bad_dedupe_header', 'bad_forward_retries', 'bad_forward_backoff'].includes(e.code)) {
+    if (['bad_response_status', 'bad_signing_scheme', 'bad_signing_secret', 'bad_signing_header', 'bad_dedupe_mode', 'bad_dedupe_header', 'bad_forward_retries', 'bad_forward_backoff', 'bad_redact_headers', 'bad_redact_json_paths'].includes(e.code)) {
       return c.json({ error: e.code, message: e.message }, 400);
     }
     throw e;

@@ -116,7 +116,7 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
   `bad_ignore`. Read-only, free tier OK. Shared `src/event-diff.js` (Node + Workers). Dashboard: event detail **⇄ Compare with another
   event** (previous / pinned / recent picker, ignore paths, all-headers toggle, colored +/−/~ list).
 - `GET /api/inboxes/:id/events?q=&method=&statusMin=&sig=&pinned=` (text / HTTP method / status ≥ N / signature `valid|invalid|unchecked` / `pinned=1|0` / auto-forward `forward=failed|pending|delivered|none`)
-- `GET /api/inboxes/:id/events/export?format=json|csv&q=&method=&statusMin=&sig=&pinned=&forward=&limit=` → bulk download of the **current filtered** set (same filters/cap as list; free tier OK; JSON rows carry `signature`, CSV adds `signatureValid,signatureReason,pinned,note,dedupeKey,forwardState,forwardAttempts`)
+- `GET /api/inboxes/:id/events/export?format=json|csv&q=&method=&statusMin=&sig=&pinned=&forward=&limit=` → bulk download of the **current filtered** set (same filters/cap as list; free tier OK; JSON rows carry `signature`, CSV adds `signatureValid,signatureReason,pinned,note,dedupeKey,forwardState,forwardAttempts,redactedHeaders,redactedJsonPaths`)
 - `POST /api/inboxes/:id/events/replay-bulk` `{ targetUrl?, q?, method?, statusMin?, limit? }` → serially replay the **current filtered** set via the same forward path (default/hard max 50; free tier OK). Target = `targetUrl` else inbox `forwardUrl`; neither → 400 `no_forward_url`.
 - `POST /api/inboxes/:id/events/delete-bulk` `{ q?, method?, statusMin?, limit?, confirm: true, includePinned? }` → delete the **current filtered** set (same filters; default/hard max 50; free tier OK; pinned events skipped unless `includePinned: true`). Missing `confirm: true` → 400 `confirm_required`. Returns `{ ok, inboxId, filters, deleted, ids }`; inbox `eventCount` decremented.
 - `GET /api/inboxes/:id/alerts?limit=20` → recent Pro alert records
@@ -154,6 +154,16 @@ one-time unlock code → paste in dashboard **Unlock Pro**. (Reusable `HOOKKEEP-
   `newestReceivedAt` / `windowStartedAt` (null when `window=all`) / `generatedAt`. Bad window → 400
   `bad_window`. Free tier OK. Shared `src/inbox-stats.js` (Node + Workers). Dashboard: compact **Stats**
   panel with a window selector.
+- **Capture redaction** — `PATCH /api/inboxes/:id` `{ redactHeaders?, redactJsonPaths? }` (array or comma/newline
+  string; empty = none). Header names are case-insensitive (≤40 names, each ≤80 chars, stored lowercase). JSON
+  paths use dot + optional `[index]` (≤40 paths, each ≤120 chars). After signature verify + dedupe key compute,
+  Hookkeep redacts a **copy** used for storage and auto-forward: matching headers → `"[REDACTED]"` (presence
+  preserved); JSON object/array bodies replace matching paths with `"[REDACTED]"` and re-serialize (non-JSON:
+  header redaction only). Event records `redaction: { headers, jsonPaths }` for names/paths that matched.
+  Bad paths → 400 `bad_redact_json_paths` / `bad_redact_headers` (patch not applied). Free tier OK (security
+  hygiene). Shared `src/redact.js` (Node + Workers). Dashboard: sidebar **Redact** panel; muted `redacted`
+  badge on events that were scrubbed. List/export include the summary; CSV adds trailing
+  `redactedHeaders,redactedJsonPaths`.
 - `POST /api/unlock` `{ "code" }`
 - `POST /api/waitlist` `{ "email", "note?" }`
 - Operator: `npm run digest-waitlist` → mailto draft of waitlist + Stripe unlock path (no SMTP)

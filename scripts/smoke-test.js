@@ -1,5 +1,5 @@
 /** Local smoke test against a running server (default http://127.0.0.1:8787)
- * Steps: create → ingest → list → export → forwardUrl → replay → replay-bulk → delete-bulk → auto-forward → demo unlock → pro alerts → free tier → custom response → signature check → event pin → event diff → ingest dedupe → auto-forward retries → inbox stats
+ * Steps: create → ingest → list → export → forwardUrl → replay → replay-bulk → delete-bulk → auto-forward → demo unlock → pro alerts → free tier → custom response → signature check → event pin → event diff → ingest dedupe → auto-forward retries → inbox stats → capture redaction
  */
 import http from 'node:http';
 import { createHmac } from 'node:crypto';
@@ -167,7 +167,7 @@ async function main() {
   const expCsv = await expCsvRes.text();
   const csvLines = expCsv.trim().split(/\r?\n/);
   check(
-    csvLines[0] === 'id,receivedAt,method,status,contentType,bodyPreview,autoForwardOk,signatureValid,signatureReason,pinned,note,dedupeKey,forwardState,forwardAttempts',
+    csvLines[0] === 'id,receivedAt,method,status,contentType,bodyPreview,autoForwardOk,signatureValid,signatureReason,pinned,note,dedupeKey,forwardState,forwardAttempts,redactedHeaders,redactedJsonPaths',
     'csv header mismatch'
   );
   check(csvLines.length >= 3, `csv expected header+rows, got ${csvLines.length}`);
@@ -765,6 +765,59 @@ async function main() {
     const h1 = await fetch(`${BASE}/api/inboxes/${sc.inbox.id}/stats?window=1h`, { headers: sAuth }).then((r) => r.json());
     check(h1.window === '1h' && h1.total === 2, 'window=1h');
     console.log('stats: bad_window 400 / default 24h / byMethod / window=all');
+  }
+
+  step('capture redaction');
+  {
+    const rc = await fetch(`${BASE}/api/workspace`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'redact-smoke@example.com', label: 'redact' }),
+    }).then((r) => r.json());
+    const rAuth = { 'x-hookkeep-token': rc.ownerToken, 'content-type': 'application/json' };
+    const bad = await fetch(`${BASE}/api/inboxes/${rc.inbox.id}`, {
+      method: 'PATCH',
+      headers: rAuth,
+      body: JSON.stringify({ redactJsonPaths: 'bad path!' }),
+    });
+    check(bad.status === 400 && (await bad.json()).error === 'bad_redact_json_paths', 'bad_redact_json_paths not 400');
+    const set = await fetch(`${BASE}/api/inboxes/${rc.inbox.id}`, {
+      method: 'PATCH',
+      headers: rAuth,
+      body: JSON.stringify({
+        redactHeaders: 'Authorization, X-Secret',
+        redactJsonPaths: 'apiKey, nested.token',
+      }),
+    }).then((r) => r.json());
+    check(
+      set.inbox?.redactHeaders?.includes('authorization') && set.inbox?.redactJsonPaths?.includes('apiKey'),
+      'redact config not saved'
+    );
+    const ingest = await fetch(`${BASE}/hook/${rc.inbox.id}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer raw-token',
+        'x-secret': 'shh',
+        'x-request-id': 'keep',
+      },
+      body: JSON.stringify({ apiKey: 'live_smoke', nested: { token: 't', keep: true }, status: 200 }),
+    }).then((r) => r.json());
+    check(ingest.ok && ingest.id, `redact ingest ${JSON.stringify(ingest)}`);
+    const ev = await fetch(`${BASE}/api/events/${ingest.id}`, { headers: rAuth }).then((r) => r.json());
+    check(ev.event?.headers?.authorization === '[REDACTED]', 'header not redacted');
+    check(ev.event?.headers?.['x-secret'] === '[REDACTED]', 'x-secret not redacted');
+    check(ev.event?.headers?.['x-request-id'] === 'keep', 'x-request-id clobbered');
+    check(ev.event?.bodyJson?.apiKey === '[REDACTED]', 'apiKey not redacted');
+    check(ev.event?.bodyJson?.nested?.token === '[REDACTED]', 'nested.token not redacted');
+    check(ev.event?.bodyJson?.nested?.keep === true, 'nested.keep lost');
+    check(ev.event?.redaction?.headers?.includes('authorization'), 'redaction.headers missing');
+    check(ev.event?.redaction?.jsonPaths?.includes('apiKey'), 'redaction.jsonPaths missing');
+    const csv = await fetch(`${BASE}/api/inboxes/${rc.inbox.id}/events/export?format=csv`, { headers: rAuth }).then((r) =>
+      r.text()
+    );
+    check(csv.split('\n')[0].includes('redactedHeaders'), 'csv missing redactedHeaders');
+    console.log('redact: bad path 400 / header+json redacted / summary + csv');
   }
 
   step('waitlist');

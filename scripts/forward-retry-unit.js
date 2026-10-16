@@ -290,7 +290,7 @@ const db = await import('../src/db.js');
   assert.equal(exp.events.length, 3);
   assert.ok(exp.events.every((e) => e.autoForward.state === 'failed' && Array.isArray(e.autoForward.attempts)));
   const csv = db.eventsToCsv(db.exportEvents(ws, inboxId, {}).raw);
-  assert.ok(csv.split('\n')[0].endsWith(',dedupeKey,forwardState,forwardAttempts'));
+  assert.ok(csv.split('\n')[0].endsWith(',dedupeKey,forwardState,forwardAttempts,redactedHeaders,redactedJsonPaths'));
   assert.ok(csv.includes(',delivered,3'));
 
   // manual retry-failed: override target that now works → all three delivered
@@ -417,7 +417,7 @@ const listW = await (await call(`/api/inboxes/${inboxId}/events?forward=failed`,
 assert.deepEqual(listW.events.map((e) => e.id), [w2.id]);
 assert.equal(listW.events[0].forwardState, 'failed');
 const csvW = await (await call(`/api/inboxes/${inboxId}/events/export?format=csv&forward=delivered`, { headers: auth })).text();
-assert.ok(csvW.split('\n')[0].endsWith(',forwardState,forwardAttempts'));
+assert.ok(csvW.split('\n')[0].endsWith(',forwardState,forwardAttempts,redactedHeaders,redactedJsonPaths'));
 assert.equal(csvW.trim().split('\n').length, 2, 'one delivered row');
 
 const rw = await call(`/api/inboxes/${inboxId}/events/retry-forwards`, {

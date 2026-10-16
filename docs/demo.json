@@ -1,6 +1,6 @@
 {
   "demoUrl": "https://kestrel-devagent.github.io/hookkeep/",
   "billingUrl": null,
-  "updatedAt": "2026-10-15T09:15:00-04:00",
-  "note": "trycloudflare still rate-limited (HTTP 429 / error 1015) since 2026-09-21 \u2014 no live ephemeral inbox. Durable marketing/docs: https://kestrel-devagent.github.io/hookkeep/. Inbox stats shipped 2026-10-15 \u2014 GET /api/inboxes/:id/stats?window=1h|24h|7d|all (default 24h): total/pinned/byMethod/byStatusBucket/byForwardState/bySignature + oldest/newest; dashboard Stats panel. Prior: auto-forward retries (2026-10-13), ingest dedupe (2026-10-12), event diff (2026-10-09), event pins + notes (2026-10-08), webhook signature verification (2026-10-07), custom ingest response (2026-10-06), bulk delete filtered (2026-10-05), bulk replay filtered (2026-10-02), bulk filtered export JSON/CSV (2026-09-25). Self-host via DEPLOY.md / Docker. Local :8787 remains the operator demo."
+  "updatedAt": "2026-10-16T09:00:00-04:00",
+  "note": "trycloudflare still rate-limited (HTTP 429 / error 1015) since 2026-09-21 \u2014 no live ephemeral inbox. Durable marketing/docs: https://kestrel-devagent.github.io/hookkeep/. Capture redaction shipped 2026-10-16 \u2014 PATCH redactHeaders/redactJsonPaths; secrets replaced with [REDACTED] before store + auto-forward; dashboard Redact panel. Prior: inbox stats (2026-10-15), auto-forward retries (2026-10-13), ingest dedupe (2026-10-12), event diff (2026-10-09), event pins + notes (2026-10-08), webhook signature verification (2026-10-07), custom ingest response (2026-10-06), bulk delete filtered (2026-10-05), bulk replay filtered (2026-10-02), bulk filtered export JSON/CSV (2026-09-25). Self-host via DEPLOY.md / Docker. Local :8787 remains the operator demo."
 }

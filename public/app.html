@@ -131,6 +131,14 @@
             <input id="dedupe-header" type="text" placeholder="idempotency-key" style="width:100%;margin:0.35rem 0" />
           </div>
         </details>
+        <details id="redact-panel" style="margin:0.5rem 0">
+          <summary class="muted" style="cursor:pointer;font-size:0.8rem">Redact <span id="redact-badge" class="muted"></span></summary>
+          <p class="fine" style="font-size:0.72rem;margin:0.35rem 0">Replace secrets before store and auto-forward. Signature verify and dedupe still use the raw request. One name/path per line (or comma-separated).</p>
+          <label class="muted" style="font-size:0.8rem">Header names (case-insensitive)</label>
+          <textarea id="redact-headers" rows="2" placeholder="authorization, x-api-key" style="width:100%;margin:0.35rem 0;font-family:monospace;font-size:0.8rem"></textarea>
+          <label class="muted" style="font-size:0.8rem">JSON body paths</label>
+          <textarea id="redact-json-paths" rows="2" placeholder="apiKey, data.secret, items[0].token" style="width:100%;margin:0.35rem 0;font-family:monospace;font-size:0.8rem"></textarea>
+        </details>
         <details id="stats-panel" style="margin:0.5rem 0" open>
           <summary class="muted" style="cursor:pointer;font-size:0.8rem">Stats <span id="stats-badge" class="muted"></span></summary>
           <div style="display:flex;gap:0.35rem;align-items:center;margin:0.35rem 0">
@@ -185,6 +193,7 @@
           <p id="auto-forward-status" class="muted" style="font-size:0.85rem;margin:0.5rem 0" hidden></p>
           <p id="signature-status" class="muted" style="font-size:0.85rem;margin:0.5rem 0" hidden></p>
           <p id="dedupe-status" class="muted" style="font-size:0.85rem;margin:0.5rem 0" hidden></p>
+          <p id="redact-status" class="muted" style="font-size:0.85rem;margin:0.5rem 0" hidden></p>
           <h4 class="muted">Headers</h4>
           <pre id="ev-headers"></pre>
           <h4 class="muted">Body</h4>
@@ -429,6 +438,14 @@ function render() {
       const labels = { none: '· off', idempotency: '· Idempotency-Key', 'body-hash': '· body hash', either: '· either' };
       $('dedupe-badge').textContent = labels[dm] || '· off';
     }
+    if ($('redact-headers')) {
+      const rh = Array.isArray(active.redactHeaders) ? active.redactHeaders : [];
+      const rp = Array.isArray(active.redactJsonPaths) ? active.redactJsonPaths : [];
+      $('redact-headers').value = rh.join('\n');
+      $('redact-json-paths').value = rp.join('\n');
+      const n = rh.length + rp.length;
+      $('redact-badge').textContent = n ? `· ${n}` : '· off';
+    }
     $('empty-curl').textContent =
       `curl -X POST ${active.webhookUrl} \\\n  -H 'content-type: application/json' \\\n  -d '{"hello":"hookkeep","status":"ok"}'`;
     // Warn when the configured public URL host doesn't match this page's host
@@ -528,7 +545,7 @@ async function loadEvents() {
   tbody.innerHTML = data.events.map((e) => `
     <tr data-id="${e.id}" data-pinned="${e.pinned ? '1' : '0'}">
       <td>${new Date(e.receivedAt).toLocaleString()}</td>
-      <td>${e.pinned ? `<span title="${escapeHtml(e.note ? `Pinned — ${e.note}` : 'Pinned (never trimmed)')}">📌</span> ` : ''}<code>${e.method}</code>${e.respondedCustom ? ` <span class="muted" title="Hookkeep answered with your custom response">↩ ${escapeHtml(String(e.respondedStatus))}</span>` : ''}${e.signature ? ` <span title="${escapeHtml(`${e.signature.scheme}: ${e.signature.reason}`)}" style="color:${e.signature.valid ? 'var(--ok, #3d9a5f)' : 'var(--danger)'}">${e.signature.valid ? '✓ sig' : '✗ sig'}</span>` : ''}${e.dedupeKey ? ` <span class="muted" title="${escapeHtml(e.dedupeKey)}" style="font-size:0.72rem">dedupe</span>` : ''}${forwardBadge(e)}</td>
+      <td>${e.pinned ? `<span title="${escapeHtml(e.note ? `Pinned — ${e.note}` : 'Pinned (never trimmed)')}">📌</span> ` : ''}<code>${e.method}</code>${e.respondedCustom ? ` <span class="muted" title="Hookkeep answered with your custom response">↩ ${escapeHtml(String(e.respondedStatus))}</span>` : ''}${e.signature ? ` <span title="${escapeHtml(`${e.signature.scheme}: ${e.signature.reason}`)}" style="color:${e.signature.valid ? 'var(--ok, #3d9a5f)' : 'var(--danger)'}">${e.signature.valid ? '✓ sig' : '✗ sig'}</span>` : ''}${e.dedupeKey ? ` <span class="muted" title="${escapeHtml(e.dedupeKey)}" style="font-size:0.72rem">dedupe</span>` : ''}${e.redaction && ((e.redaction.headers && e.redaction.headers.length) || (e.redaction.jsonPaths && e.redaction.jsonPaths.length)) ? ` <span class="muted" title="${escapeHtml([...(e.redaction.headers || []), ...(e.redaction.jsonPaths || [])].join(', '))}" style="font-size:0.72rem">redacted</span>` : ''}${forwardBadge(e)}</td>
       <td>${e.statusGuess ? `<code>${escapeHtml(e.statusGuess)}</code>` : '—'}</td>
       <td class="muted">${e.note ? `<em>${escapeHtml(e.note)}</em> · ` : ''}${escapeHtml(e.preview || '')}</td>
     </tr>`).join('');
@@ -638,6 +655,20 @@ async function openEvent(id) {
     } else {
       ddEl.hidden = true;
       ddEl.textContent = '';
+    }
+  }
+  const rdEl = $('redact-status');
+  if (rdEl) {
+    const rd = data.event.redaction;
+    const bits = [];
+    if (rd && Array.isArray(rd.headers) && rd.headers.length) bits.push('headers: ' + rd.headers.join(', '));
+    if (rd && Array.isArray(rd.jsonPaths) && rd.jsonPaths.length) bits.push('json: ' + rd.jsonPaths.join(', '));
+    if (bits.length) {
+      rdEl.hidden = false;
+      rdEl.textContent = 'redacted · ' + bits.join(' · ');
+    } else {
+      rdEl.hidden = true;
+      rdEl.textContent = '';
     }
   }
   const afEl = $('auto-forward-status');
@@ -1125,6 +1156,12 @@ $('btn-save-inbox').onclick = async () => {
           ? {
               dedupeMode: $('dedupe-mode').value,
               dedupeHeader: $('dedupe-header').value,
+            }
+          : {}),
+        ...($('redact-headers')
+          ? {
+              redactHeaders: $('redact-headers').value,
+              redactJsonPaths: $('redact-json-paths').value,
             }
           : {}),
       }),

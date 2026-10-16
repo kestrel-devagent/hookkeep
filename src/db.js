@@ -35,6 +35,13 @@ import {
   publicForwardFields,
 } from './forward-retry.js';
 import { computeInboxStats, parseStatsWindow } from './inbox-stats.js';
+import {
+  normalizeRedactPatch,
+  publicRedactConfig,
+  applyCaptureRedaction,
+  publicRedactionSummary,
+  redactHeadersCopy,
+} from './redact.js';
 
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 12);
 const id16 = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 16);
@@ -129,6 +136,8 @@ function makeInbox(db, ws, { name = 'Inbox' } = {}) {
     dedupeHeader: 'idempotency-key',
     dedupeMap: {},
     dedupeOrder: [],
+    redactHeaders: [],
+    redactJsonPaths: [],
     createdAt: new Date().toISOString(),
     eventCount: 0,
   };
@@ -235,10 +244,17 @@ export function updateInbox(ws, inboxId, patch) {
     err.code = fp.error;
     throw err;
   }
+  const rdp = normalizeRedactPatch(patch);
+  if (!rdp.ok) {
+    const err = new Error(rdp.message);
+    err.code = rdp.error;
+    throw err;
+  }
   Object.assign(inbox, rp.patch);
   Object.assign(inbox, sp.patch);
   Object.assign(inbox, dp.patch);
   Object.assign(inbox, fp.patch);
+  Object.assign(inbox, rdp.patch);
   if (patch.name != null) inbox.name = String(patch.name).slice(0, 80);
   if (patch.forwardUrl != null) inbox.forwardUrl = String(patch.forwardUrl).slice(0, 500);
   if (patch.autoForward != null) inbox.autoForward = Boolean(patch.autoForward);
@@ -286,12 +302,29 @@ export function ingestEvent(inboxId, { method, headers, bodyText, contentType, s
   // Soft monthly cap: still accept but mark over_quota for free after keep window
   const eventId = 'ev_' + id16();
   const receivedAt = new Date().toISOString();
-  let parsed = null;
-  try {
-    if (bodyText && (contentType || '').includes('json')) parsed = JSON.parse(bodyText);
-    else if (bodyText && bodyText.trim().startsWith('{')) parsed = JSON.parse(bodyText);
-  } catch {
+
+  // Capture redaction AFTER signature/dedupe (those used raw bytes) — copy for store + auto-forward
+  const redacted = applyCaptureRedaction(inbox, { headers, bodyText, contentType, size });
+  const storeHeaders = redacted.headers;
+  const storeBodyText = redacted.bodyText;
+  const storeContentType = redacted.contentType || contentType || '';
+  const storeSize =
+    redacted.size != null
+      ? redacted.size
+      : size != null
+        ? size
+        : Buffer.byteLength(storeBodyText || '', 'utf8');
+
+  let parsed = redacted.bodyJson;
+  if (parsed === undefined) {
     parsed = null;
+    try {
+      if (storeBodyText && (storeContentType || '').includes('json')) parsed = JSON.parse(storeBodyText);
+      else if (storeBodyText && storeBodyText.trim().startsWith('{')) parsed = JSON.parse(storeBodyText);
+      else if (storeBodyText && storeBodyText.trim().startsWith('[')) parsed = JSON.parse(storeBodyText);
+    } catch {
+      parsed = null;
+    }
   }
 
   const statusGuess =
@@ -301,17 +334,19 @@ export function ingestEvent(inboxId, { method, headers, bodyText, contentType, s
     id: eventId,
     inboxId,
     method,
-    headers: sanitizeHeaders(headers),
-    bodyText: String(bodyText || '').slice(0, 200_000),
+    // Built-in sanitize first; configured redactHeaders win with [REDACTED]
+    headers: redactHeadersCopy(sanitizeHeaders(storeHeaders), inbox.redactHeaders || []).headers,
+    bodyText: String(storeBodyText || '').slice(0, 200_000),
     bodyJson: parsed,
-    contentType: contentType || '',
+    contentType: storeContentType,
     statusGuess: statusGuess != null ? String(statusGuess).slice(0, 80) : null,
     receivedAt,
-    size: size != null ? size : Buffer.byteLength(bodyText || '', 'utf8'),
+    size: storeSize,
   };
   // Signature check result (computed by the caller over the raw body bytes; capture is stored regardless)
   if (signature) event.signature = signature;
   if (dedupeKey) event.dedupeKey = String(dedupeKey).slice(0, 300);
+  if (redacted.redaction) event.redaction = redacted.redaction;
 
   // Per-inbox custom ingest response (status/body/content-type) — free tier OK
   const customResponse = buildCustomResponse(inbox, event);
@@ -603,6 +638,8 @@ export function toExportEvent(e) {
   if (e.respondedStatus != null) out.respondedStatus = e.respondedStatus;
   if (e.signature && typeof e.signature === 'object') out.signature = e.signature;
   if (e.dedupeKey) out.dedupeKey = e.dedupeKey;
+  const redSum = publicRedactionSummary(e);
+  if (redSum) out.redaction = redSum;
   if (e.pinned) out.pinned = true;
   if (e.note) out.note = e.note;
   if (e.path) out.path = e.path;
@@ -646,6 +683,8 @@ export function eventsToCsv(events) {
     'dedupeKey',
     'forwardState',
     'forwardAttempts',
+    'redactedHeaders',
+    'redactedJsonPaths',
   ];
   const lines = [header.join(',')];
   for (const e of events) {
@@ -674,6 +713,12 @@ export function eventsToCsv(events) {
         escapeCsvField(e.dedupeKey || ''),
         escapeCsvField(forwardStateOf(e) || ''),
         escapeCsvField(publicForwardFields(e).forwardAttempts || ''),
+        escapeCsvField(
+          e.redaction && Array.isArray(e.redaction.headers) ? e.redaction.headers.join(';') : ''
+        ),
+        escapeCsvField(
+          e.redaction && Array.isArray(e.redaction.jsonPaths) ? e.redaction.jsonPaths.join(';') : ''
+        ),
       ].join(',')
     );
   }
@@ -1166,6 +1211,7 @@ function publicInbox(inbox) {
     ...publicSignatureConfig(inbox),
     ...publicDedupeConfig(inbox),
     ...publicForwardRetryConfig(inbox),
+    ...publicRedactConfig(inbox),
     eventCount: inbox.eventCount || 0,
     createdAt: inbox.createdAt,
   };
@@ -1185,6 +1231,7 @@ function summarizeEvent(e) {
     respondedCustom: Boolean(e.respondedCustom),
     signature: e.signature || null,
     dedupeKey: e.dedupeKey || null,
+    redaction: publicRedactionSummary(e),
     ...publicForwardFields(e),
     ...publicPinFields(e),
   };

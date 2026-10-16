@@ -51,6 +51,13 @@ import {
   WORKERS_RETRY_BUDGET_MS,
 } from '../../src/forward-retry.js';
 import { computeInboxStats, parseStatsWindow } from '../../src/inbox-stats.js';
+import {
+  normalizeRedactPatch,
+  publicRedactConfig,
+  applyCaptureRedaction,
+  publicRedactionSummary,
+  redactHeadersCopy,
+} from '../../src/redact.js';
 
 const TIERS = {
   free: { name: 'Free', maxInboxes: 1, maxEventsKeep: 50, maxEventsMonth: 500, alerts: false, maxPinned: 5 },
@@ -120,6 +127,7 @@ function publicInbox(inbox) {
     ...publicSignatureConfig(inbox),
     ...publicDedupeConfig(inbox),
     ...publicForwardRetryConfig(inbox),
+    ...publicRedactConfig(inbox),
     eventCount: inbox.eventCount || 0,
     createdAt: inbox.createdAt,
   };
@@ -138,6 +146,7 @@ function summarizeEvent(e) {
     respondedCustom: Boolean(e.respondedCustom),
     signature: e.signature || null,
     dedupeKey: e.dedupeKey || null,
+    redaction: publicRedactionSummary(e),
     ...publicForwardFields(e),
     ...publicPinFields(e),
   };
@@ -162,6 +171,8 @@ function toExportEvent(e) {
   if (e.respondedStatus != null) out.respondedStatus = e.respondedStatus;
   if (e.signature && typeof e.signature === 'object') out.signature = e.signature;
   if (e.dedupeKey) out.dedupeKey = e.dedupeKey;
+  const redSum = publicRedactionSummary(e);
+  if (redSum) out.redaction = redSum;
   if (e.pinned) out.pinned = true;
   if (e.note) out.note = e.note;
   if (e.path) out.path = e.path;
@@ -205,6 +216,8 @@ function eventsToCsv(events) {
     'dedupeKey',
     'forwardState',
     'forwardAttempts',
+    'redactedHeaders',
+    'redactedJsonPaths',
   ];
   const lines = [header.join(',')];
   for (const e of events) {
@@ -233,6 +246,12 @@ function eventsToCsv(events) {
         escapeCsvField(e.dedupeKey || ''),
         escapeCsvField(forwardStateOf(e) || ''),
         escapeCsvField(publicForwardFields(e).forwardAttempts || ''),
+        escapeCsvField(
+          e.redaction && Array.isArray(e.redaction.headers) ? e.redaction.headers.join(';') : ''
+        ),
+        escapeCsvField(
+          e.redaction && Array.isArray(e.redaction.jsonPaths) ? e.redaction.jsonPaths.join(';') : ''
+        ),
       ].join(',')
     );
   }
@@ -672,11 +691,27 @@ export default {
           }
         }
 
-        let parsed = null;
-        try {
-          if (bodyText && contentType.includes('json')) parsed = JSON.parse(bodyText);
-          else if (bodyText && bodyText.trim().startsWith('{')) parsed = JSON.parse(bodyText);
-        } catch {}
+        // Capture redaction AFTER signature/dedupe — copy for store + auto-forward
+        const redacted = applyCaptureRedaction(inbox, {
+          headers,
+          bodyText,
+          contentType,
+          size: rawBody.byteLength,
+        });
+        const storeHeaders = redacted.headers;
+        const storeBodyText = redacted.bodyText;
+        const storeContentType = redacted.contentType || contentType;
+        const storeSize = redacted.size != null ? redacted.size : rawBody.byteLength;
+
+        let parsed = redacted.bodyJson;
+        if (parsed === undefined) {
+          parsed = null;
+          try {
+            if (storeBodyText && storeContentType.includes('json')) parsed = JSON.parse(storeBodyText);
+            else if (storeBodyText && storeBodyText.trim().startsWith('{')) parsed = JSON.parse(storeBodyText);
+            else if (storeBodyText && storeBodyText.trim().startsWith('[')) parsed = JSON.parse(storeBodyText);
+          } catch {}
+        }
 
         const statusGuess =
           (parsed && (parsed.status || parsed.statusCode || parsed.error || parsed.level)) || null;
@@ -686,16 +721,17 @@ export default {
           id: eventId,
           inboxId,
           method: request.method,
-          headers: sanitizeHeaders(headers),
-          bodyText: String(bodyText || '').slice(0, 200_000),
+          headers: redactHeadersCopy(sanitizeHeaders(storeHeaders), inbox.redactHeaders || []).headers,
+          bodyText: String(storeBodyText || '').slice(0, 200_000),
           bodyJson: parsed,
-          contentType,
+          contentType: storeContentType,
           statusGuess: statusGuess != null ? String(statusGuess).slice(0, 80) : null,
           receivedAt: new Date(ts).toISOString(),
-          size: rawBody.byteLength,
+          size: storeSize,
         };
         if (signature) event.signature = signature;
         if (dedupe.key) event.dedupeKey = String(dedupe.key).slice(0, 300);
+        if (redacted.redaction) event.redaction = redacted.redaction;
 
         // Per-inbox custom ingest response (status/body/content-type) — free tier OK
         const customResponse = buildCustomResponse(inbox, event);
@@ -882,6 +918,8 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           signingHeader: '',
           dedupeMode: 'none',
           dedupeHeader: 'idempotency-key',
+          redactHeaders: [],
+          redactJsonPaths: [],
           createdAt: new Date().toISOString(),
           eventCount: 0,
         };
@@ -945,6 +983,8 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
           signingHeader: '',
           dedupeMode: 'none',
           dedupeHeader: 'idempotency-key',
+          redactHeaders: [],
+          redactJsonPaths: [],
           createdAt: new Date().toISOString(),
           eventCount: 0,
         };
@@ -972,10 +1012,13 @@ Customers can email <a style="color:#3dd6c6" href="mailto:hudson.gouge@projxon.a
         if (!dp.ok) return json({ error: dp.error, message: dp.message }, 400);
         const fp = normalizeForwardRetryPatch(body);
         if (!fp.ok) return json({ error: fp.error, message: fp.message }, 400);
+        const rdp = normalizeRedactPatch(body);
+        if (!rdp.ok) return json({ error: rdp.error, message: rdp.message }, 400);
         Object.assign(inbox, rp.patch);
         Object.assign(inbox, sp.patch);
         Object.assign(inbox, dp.patch);
         Object.assign(inbox, fp.patch);
+        Object.assign(inbox, rdp.patch);
         if (body.name != null) inbox.name = String(body.name).slice(0, 80);
         if (body.forwardUrl != null) inbox.forwardUrl = String(body.forwardUrl).slice(0, 500);
         if (body.autoForward != null) inbox.autoForward = Boolean(body.autoForward);
